@@ -1,28 +1,24 @@
-
-[SISTEMA] Servidor iniciado com sucesso. Digite 'ajuda' para comandos de depuracao.
-
-[CLUSTER:TCP] [INFO] Canal de cluster escutando na porta 9001
-[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 3 (127.0.0.1:9003)
-[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 2 (127.0.0.1:9002)
-[CLUSTER] [INFO] Nenhum lider ativo encontrado. Assumindo lideranca inicial (Nó 1)...
-[SERVIDOR:TCP] [INFO] Escutando na porta 6789
-=== SERVICOS DE ATENDIMENTO ABERTOS (PAPEL: ATIVO) ===
-Interfaces de rede detectadas:
-[SERVIDOR:TCP] [INFO] Escutando na porta 5000
-  -> [wlan0] IPv4: 192.168.15.124
-TCP escutando em 6789
-UDP escutando em 7777
-Discovery escutando em 8888
-======================================================
-[DISCOVERY:5001] Farol UDP ligado na porta 5001 aguardando buscas...
-[DISCOVERY:8888] Farol UDP ligado na porta 8888 aguardando buscas...
-[SERVIDOR:UDP] [INFO] Escutando na porta 7777
-[SERVIDOR:UDP] [INFO] Escutando na porta 5000
-[SERVIDOR:TCP] [INFO] Nova conexao recebida de 127.0.0.1
-[ATENDIMENTO] [INFO] Processando comando REGISTER
-[GERENCIADOR] [INFO] Usuario 'AgenteTeste' registrado com sucesso. Total ativos: 1 | Versao: 1
-[ATENDIMENTO] [INFO] Processamento de REGISTER de 'AgenteTeste' concluido.
-[ATENDIMENTO] [INFO] Processando comando JOIN
-[NOTIFICADOR] [INFO] Notificacao UPDATE_USERS disparada para 1 clientes.
-[GERENCIADOR] [INFO] Usuario 'AgenteTeste' entrou no grupo 'SALA_SECRETA'. Total: 1 | Versao: 2
-[ATENDIMENTO] [INFO] Processamento de JOIN de 'AgenteTeste' concluido.
+[15:27:19] [CONFIG:AUTO] Sondando nos existentes (LAN + localhost) para atribuicao automatica de ID...
+[15:27:20] [CONFIG:AUTO] IDs ja ocupados na rede: nenhum -> este no assumiu o ID 3 (pioneiro)
+[15:27:20] [CONFIG:AUTO] No 3 -> Shard S2 [S..Z] (S2) | Replica 0 | Portas: TCP=5003, UDP=6003, Cluster=7003 | Host anunciado: 127.0.0.1
+[15:27:20] [CONFIG:AUTO] Pares conhecidos no Shard S2: 0
+[1m[SHARD-2 | REPLICA-0 | [35mINICIANDO[0m[1m][0m Particao ativa neste processo: S2 [S..Z][0m
+[1m[SHARD-2 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [15:27:20] [BEACON:SHARD] Farol intra-shard S2 escutando na porta UDP 9896[0m
+[1m[SHARD-2 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [CLUSTER:TCP] [INFO] Canal de cluster escutando em 0.0.0.0:7003 (host anunciado: 127.0.0.1)[0m
+[1m[SHARD-2 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [SISTEMA] Servidor iniciado. Digite 'status', 'lideres', 'shards', 'estado', 'ajuda' ou 'sair'.[0m
+[1m[SHARD-2 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [15:27:20] [HEARTBEAT] Cluster operacional: 1/1 nos ativos | Lider atual: NENHUM[0m
+[1m[SHARD-2 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [32m[15:27:22] [LIDER ATIVO] Nenhum lider ativo encontrado na rede. Assumindo lideranca pioneira (No 3)...[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [31m[SERVIDOR:TCP] [ERROR] Endereço já em uso (Bind failed)[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [UDP] Escutando na porta 6003[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m === SERVICOS DE ATENDIMENTO ABERTOS (SHARD S2 | PAPEL: ATIVO) ===[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m Interfaces de rede detectadas:[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [DISCOVERY:8888] Farol UDP ligado na porta 8888 (Shard S2) aguardando buscas...[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m TCP escutando em 5003 (+ interoperavel 6791)[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m UDP escutando em 6003 (+ interoperavel 7779)[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m Discovery escutando em 8888, 8890 e 5001[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m =================================================================[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [DISCOVERY:5001] Farol UDP ligado na porta 5001 (Shard S2) aguardando buscas...[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [31m[SERVIDOR:TCP] [ERROR] Endereço já em uso (Bind failed)[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [32m[15:27:22] [LIDER ATIVO] Shard S2 [S..Z] | Replica 0 (No 3) assumiu coordenacao do cluster (Epoca: 0, Versao: 0, Hash: 4108050209)[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [DISCOVERY:8890] Farol UDP ligado na porta 8890 (Shard S2) aguardando buscas...[0m
+[1m[SHARD-2 | REPLICA-0 | [32mATIVO[0m[1m][0m [UDP] Escutando na porta 7779[0m

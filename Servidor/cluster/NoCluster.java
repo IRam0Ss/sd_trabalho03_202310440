@@ -360,6 +360,11 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
 
     // Conecta replicacao sincrona para todas as operacoes recebidas dos clientes (D2)
     gerenciador.setListenerReplicacao(op -> replicador.executar(op, this.epoca));
+
+    // Anuncia imediatamente aos demais Shards e a toda a LAN fisica que este no e o novo lider
+    if (roteador != null) {
+      roteador.forcarAnuncioImediato();
+    }
   }
 
   /**

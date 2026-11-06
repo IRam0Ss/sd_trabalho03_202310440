@@ -230,6 +230,21 @@ public class RoteadorShards {
         host, totalReplicas);
   }
 
+  /**
+   * Forca o envio imediato de anuncio de shard e broadcast LAN quando um no assume como ATIVO.
+   * Evita esperar o ciclo periodico de 1 segundo para atualizar o cluster e clientes.
+   */
+  public void forcarAnuncioImediato() {
+    pool.execute(() -> {
+      try {
+        atualizarProprioShard();
+        anunciar();
+        verificarTransicoes();
+      } catch (Exception ignored) {
+      }
+    });
+  }
+
   /** Registra anuncio de outro shard recebido via farol UDP broadcast na LAN fisica. */
   public void registrarAnuncioExternoLAN(
       int idShard, int idNo, String papel, long epoca, int idLiderConhecido, String hostRemoto) {

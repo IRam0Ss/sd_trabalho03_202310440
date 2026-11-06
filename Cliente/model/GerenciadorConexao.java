@@ -135,6 +135,9 @@ public class GerenciadorConexao {
     if (pTcp == Protocolo.PORTA_SERVIDOR_LEGACY) {
       return 6000;
     }
+    if (pTcp >= 6789 && pTcp <= 6795) {
+      return 7777 + (pTcp - 6789);
+    }
     return pTcp + (Protocolo.PORTA_SERVIDOR_UDP - Protocolo.PORTA_SERVIDOR_TCP);
   }
 
@@ -142,6 +145,9 @@ public class GerenciadorConexao {
     if (pTcp > 5000 && pTcp < 5100) {
       int id = pTcp - 5000;
       return Math.floorMod(id - 1, NUM_SHARDS);
+    }
+    if (pTcp >= 6789 && pTcp <= 6791) {
+      return pTcp - 6789;
     }
     if (pTcp == Protocolo.PORTA_SERVIDOR_LEGACY) {
       return 0;
@@ -400,8 +406,10 @@ public class GerenciadorConexao {
   }
 
   /**
-   * Inicia a thread de monitoramento continuo com PING periodico (a cada 1500 ms).
-   * Ao capturar queda do socket TCP ou resposta nao-ATIVO, limpa a conexao e dispara failover via Discovery UDP.
+   * Inicia a thread de monitoramento continuo e resiliente de liveness do socket TCP.
+   * Ao capturar queda fisica do socket (IOException, EOFException, SocketException) ou indicacao explicita
+   * de STANDBY, limpa a conexao e dispara a busca por uma nova porta de entrada.
+   * Nao derruba conexoes com servidores de colegas que respondem OK sem o texto "ATIVO".
    */
   public void iniciarMonitoramento() {
     Thread threadPing = new Thread(() -> {
@@ -416,23 +424,35 @@ public class GerenciadorConexao {
           continue;
         }
 
+        // 1. Verificacao de liveness do socket TCP local
+        if (tcp == null || !tcp.isConectado()) {
+          System.out.println("[FAILOVER] [WARNING] Socket TCP desconectado. Disparando busca por nova porta de entrada...");
+          if (tcp != null) tcp.fecharConexao();
+          executarFailover();
+          continue;
+        }
+
+        // 2. Sondagem suave de canal TCP
         try {
           APDU resPing = tcp.pingDireto();
-          if (resPing == null || !Protocolo.OK.equals(resPing.getOperacao())
-              || !"ATIVO".equalsIgnoreCase(resPing.getTextoMensagem())) {
-            System.out.println("[FAILOVER] [WARNING] No atual deixou de responder como ATIVO. Disparando failover...");
+          // IMPORTANTE: NAO derruba conexao se a resposta nao contiver a palavra "ATIVO"!
+          // Servidores de colegas respondem OK: pong, OK, ou texto livre.
+          // Apenas se o no indicar explicitamente papel STANDBY ou NAO_LIDER
+          if (resPing != null && Protocolo.ERRO.equals(resPing.getOperacao())
+              && ("STANDBY".equalsIgnoreCase(resPing.getTextoMensagem()) || "NAO_LIDER".equalsIgnoreCase(resPing.getTextoMensagem()))) {
+            System.out.println("[FAILOVER] [WARNING] No atual indicou papel STANDBY. Disparando failover...");
             tcp.fecharConexao();
             executarFailover();
           }
         } catch (IOException e) {
           if (!executando) break;
-          System.out.println("[FAILOVER] [WARNING] Queda do socket TCP detectada no heartbeat ("
-              + e.getClass().getSimpleName() + ": " + e.getMessage() + "). Disparando Discovery UDP...");
+          System.out.println("[FAILOVER] [WARNING] Queda real do socket TCP ("
+              + e.getClass().getSimpleName() + ": " + e.getMessage() + "). Disparando busca por nova porta de entrada...");
           tcp.fecharConexao();
           executarFailover();
         }
       }
-    }, "Thread-Cliente-MonitoramentoPING");
+    }, "Thread-Cliente-MonitoramentoSocket");
     threadPing.setDaemon(true);
     threadPing.start();
   }
@@ -513,13 +533,13 @@ public class GerenciadorConexao {
         while (!encontrou && executando && tentativasGerais < 30) {
           tentativasGerais++;
 
-          // 3. Discovery UDP Universal: aceita o lider de qualquer shard disponivel
+          // 1. Discovery UDP Universal: aceita o lider de qualquer shard disponivel
           List<EnderecoServidor> descobertos = descobrirServidoresViaUDP(900);
           for (EnderecoServidor d : descobertos) {
             adicionarOuAtualizarServidor(d);
           }
 
-          // Monta lista ordenada de candidatos priorizando quem respondeu ATIVO no Discovery UDP agora
+          // Monta lista de candidatos combinando Cache + Broadcast + Varredura Rapida de Portas
           List<EnderecoServidor> candidatos = new ArrayList<>();
           EnderecoServidor endpointAntigo = null;
 
@@ -541,63 +561,107 @@ public class GerenciadorConexao {
             }
           }
 
-          // Fallback de portas matematicas locais caso firewall bloqueie pacotes UDP de broadcast
-          int[] portasFallbackLocal = new int[] { 5000, 5001, 5100, 5101, 5200, 5201 };
-          for (int pLocal : portasFallbackLocal) {
-            EnderecoServidor fb = new EnderecoServidor(
-                "127.0.0.1", pLocal, calcularPortaUdpPadrao(pLocal), inferirShardPorPortaTcp(pLocal), "ATIVO");
-            if (portaAntiga == pLocal && "127.0.0.1".equals(hostAntigo)) {
-              if (endpointAntigo == null) endpointAntigo = fb;
-            } else if (!candidatos.contains(fb)) {
-              candidatos.add(fb);
+          // 2. Camada de Varredura de Portas Consagradas (Colegas: 6789..6791 | EDEN: 5001..5004, 5000)
+          List<String> hostsParaVarredura = new ArrayList<>();
+          if (hostAntigo != null && !hostAntigo.trim().isEmpty() && !hostsParaVarredura.contains(hostAntigo.trim())) {
+            hostsParaVarredura.add(hostAntigo.trim());
+          }
+          if (!hostsParaVarredura.contains("127.0.0.1")) {
+            hostsParaVarredura.add("127.0.0.1");
+          }
+          for (EnderecoServidor c : getServidoresConhecidos()) {
+            if (c.host != null && !hostsParaVarredura.contains(c.host.trim())) {
+              hostsParaVarredura.add(c.host.trim());
             }
           }
 
-          // Deixa o endpoint anterior por ultimo (permite reconectar nele se o motivo foi Amnesia de outro Shard!)
+          int[] portasVarredura = new int[] { 6789, 6790, 6791, 5001, 5002, 5003, 5004, 5000 };
+          for (String hAlvo : hostsParaVarredura) {
+            for (int pTcp : portasVarredura) {
+              EnderecoServidor cand = new EnderecoServidor(
+                  hAlvo, pTcp, calcularPortaUdpPadrao(pTcp), inferirShardPorPortaTcp(pTcp), "ATIVO");
+              if (portaAntiga == pTcp && hAlvo.equalsIgnoreCase(hostAntigo)) {
+                if (endpointAntigo == null) endpointAntigo = cand;
+              } else if (!candidatos.contains(cand)) {
+                candidatos.add(cand);
+              }
+            }
+          }
+
+          // Deixa o endpoint anterior por ultimo (para evitar reconectar imediatamente no mesmo que acabou de cair)
           if (endpointAntigo != null && !candidatos.contains(endpointAntigo)) {
             candidatos.add(endpointAntigo);
           }
 
+          // 3. Validacao Direta da Nova Porta de Entrada (PING brando ou resposta APDU de REGISTER)
           for (EnderecoServidor end : candidatos) {
             if (!executando) break;
             try {
               try (Socket testSocket = new Socket()) {
-                testSocket.connect(new InetSocketAddress(end.host, end.portaTcp), 600);
+                testSocket.connect(new InetSocketAddress(end.host, end.portaTcp), 450);
               }
 
-              // Conecta o ClienteTCP ao novo lider candidato
+              // Conecta o ClienteTCP ao novo candidato
               tcp.setDestino(end.host, end.portaTcp);
-              APDU res = tcp.pingDireto();
 
-              if (res != null && Protocolo.OK.equals(res.getOperacao())
-                  && "ATIVO".equalsIgnoreCase(res.getTextoMensagem())) {
+              boolean validado = false;
+              InfoUser novoInfo = null;
+
+              // 1. Tenta primeiro PING brando (se responder OK com qualquer texto, o no e ATIVO e funcional)
+              try {
+                APDU resPing = tcp.pingDireto();
+                if (resPing != null && Protocolo.OK.equals(resPing.getOperacao())) {
+                  validado = true;
+                }
+              } catch (Exception ignored) {
+                // Colegas podem nao suportar PING; continua para validacao com REGISTER
+              }
+
+              // 2. Se PING nao respondeu OK, valida via REGISTER direto (compativel com qualquer servidor de colega)
+              if (!validado && usuarioAtual != null) {
+                novoInfo = new InfoUser(usuarioAtual.getNome(), tcp.getIpLocal(), udp.getPortaLocal());
+                try {
+                  APDU resReg = tcp.registerDireto(novoInfo);
+                  if (resReg != null) {
+                    // Qualquer resposta de protocolo (OK ou erro estruturado do cluster)
+                    // confirma que o socket e o processo do servidor estao vivos e atendendo como porta de entrada!
+                    validado = true;
+                    System.out.println("[FAILOVER] [GATEWAY-OK] Porta de entrada confirmada em "
+                        + end.host + ":" + end.portaTcp + " -> " + resReg.getTextoMensagem());
+                  }
+                } catch (Exception ignored) {
+                }
+              } else if (!validado) {
+                // Caso extremo sem usuario: testa abertura simples
+                validado = true;
+              }
+
+              if (validado) {
                 int shardNovo = (end.idShard >= 0) ? end.idShard : inferirShardPorPortaTcp(end.portaTcp);
                 this.shardEntradaAtual = shardNovo;
 
-                System.out.println("[FAILOVER] [SUCESSO] Reconectado via Discovery ao lider "
-                    + end.host + ":" + end.portaTcp + " (Porta de Entrada: Shard S"
-                    + (shardNovo >= 0 ? shardNovo : "?") + ")");
+                System.out.println("[FAILOVER] [SUCESSO] Nova porta de entrada conectada: "
+                    + end.host + ":" + end.portaTcp + " (Shard S" + (shardNovo >= 0 ? shardNovo : "?") + ")");
 
                 // Atualiza o destino do socket UDP preservando a porta local efemera do cliente
                 udp.setDestino(end.host, end.portaUdp);
 
-                // 4. Reconstroi integralmente o estado volátil nos shards: REGISTER + JOINs + BLOCKs
+                // Reconstroi o estado nos shards: REGISTER + JOINs + BLOCKs
                 if (usuarioAtual != null) {
-                  InfoUser novoInfo = new InfoUser(usuarioAtual.getNome(), tcp.getIpLocal(), udp.getPortaLocal());
-                  this.usuarioAtual = novoInfo;
-                  try {
-                    tcp.registerDireto(novoInfo);
-                    System.out.println("[FAILOVER] [REBUILD] REGISTER reenviado com sucesso para '"
-                        + novoInfo.getNome() + "' (" + novoInfo.getIp() + ":" + novoInfo.getPorta() + ").");
-                  } catch (Exception exReg) {
-                    System.out.println("[FAILOVER] Aviso ao re-registrar usuario no novo gateway: " + exReg.getMessage());
+                  if (novoInfo == null) {
+                    novoInfo = new InfoUser(usuarioAtual.getNome(), tcp.getIpLocal(), udp.getPortaLocal());
+                    try {
+                      tcp.registerDireto(novoInfo);
+                    } catch (Exception ignored) {
+                    }
                   }
+                  this.usuarioAtual = novoInfo;
 
                   List<String> gruposParaReconstruir = tcp.getGruposAtivos();
                   for (String grupo : gruposParaReconstruir) {
                     try {
                       tcp.joinDireto(grupo, novoInfo);
-                      System.out.println("[FAILOVER] [REBUILD] JOIN reenviado com sucesso para o grupo '" + grupo + "'.");
+                      System.out.println("[FAILOVER] [REBUILD] JOIN restaurado no grupo '" + grupo + "'.");
                     } catch (Exception exJoin) {
                       System.out.println("[FAILOVER] Aviso ao re-ingressar no grupo '" + grupo + "': " + exJoin.getMessage());
                     }

@@ -9,7 +9,11 @@
 
 package cluster;
 
+import java.util.Collections;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -47,6 +51,13 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
   private CountDownLatch latchVotos;
   private final AtomicBoolean eleicaoEmAndamento = new AtomicBoolean(false);
   private final long inicioMs = System.currentTimeMillis();
+  private final Set<String> eventosQuedaProcessados = Collections.synchronizedSet(
+      Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(256, 0.75f, true) {
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+          return size() > 512;
+        }
+      }));
 
   public NoCluster(ConfigCluster config, GerenciadorGrupos gerenciador) {
     this.config = config;
@@ -71,6 +82,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         return epoca;
       }
     });
+    this.servidor.setRoteador(this.roteador);
     this.canal.setReceptorInterShard(roteador::receber);
   }
 
@@ -317,12 +329,15 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     this.idLiderAtivo = config.getMeuId();
 
     ConfigCluster.NoInfo info = config.getMeuNoInfo();
-    // Apenas Shard 0 / Replica 0 (TCP 5000) cuida do legado, evitando disputa entre shards
-    boolean incluirLegado = (config.getIdShard() == 0 && config.getMeuId() == 1);
-    servidor.iniciarServicos(info.portaTcp, info.portaUdp, info.portaDiscovery, incluirLegado, config.getMeuId());
+    // Qualquer lider ativo do Shard 0 (R0 na 5000, ou R1 em failover) mantem as portas legadas 5000/5001 abertas
+    boolean incluirLegado = (config.getIdShard() == 0);
+    servidor.iniciarServicos(
+        info.portaTcp, info.portaUdp, info.portaDiscovery, incluirLegado, config.getMeuId(), config.getIdShard());
 
-    ClusterLog.lider(String.format("No %d assumiu coordenacao do cluster (Epoca: %d, Versao: %d, Hash: %s)",
-        config.getMeuId(), epoca, gerenciador.getVersao(), gerenciador.calcularHash()));
+    ClusterLog.lider(String.format(
+        "Shard %s | Replica %d (No %d) assumiu coordenacao do cluster (Epoca: %d, Versao: %d, Hash: %s)",
+        Particionador.nome(config.getIdShard()), config.getIdReplica(), config.getMeuId(),
+        epoca, gerenciador.getVersao(), gerenciador.calcularHash()));
 
     // Envia COORDENADOR para todos os pares
     MensagemCluster coord = new MensagemCluster(TipoMensagemCluster.COORDENADOR, config.getMeuId());
@@ -548,7 +563,6 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
           resolverConflitoLideranca(msg);
         } else if (msg.getEpoca() >= this.epoca) {
-          ClusterLog.lider("Novo lider anunciado: No " + msg.getIdOrigem() + " (Epoca: " + msg.getEpoca() + ", Versao: " + msg.getVersao() + ")");
           this.idLiderAtivo = msg.getIdOrigem();
           this.epoca = msg.getEpoca();
           if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
@@ -563,6 +577,10 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
               canal.enviar(msg.getIdOrigem(), pedido);
             }
           }
+          ClusterLog.lider(String.format(
+              "Novo lider anunciado no Shard %s: Replica %d / No %d (Epoca: %d, Versao: %d)",
+              Particionador.nome(config.getIdShard()), msg.getIdOrigem() - 1, msg.getIdOrigem(),
+              msg.getEpoca(), msg.getVersao()));
         } else {
           ClusterLog.aviso("CLUSTER", "Ignorando COORDENADOR obsoleto do No " + msg.getIdOrigem()
               + " (Epoca " + msg.getEpoca() + " < Minha " + this.epoca + ")");
@@ -630,6 +648,34 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
 
     voto.setPayload(aceita);
     canal.enviar(msg.getIdOrigem(), voto);
+  }
+
+  /**
+   * Fase 4 (Ghost Client): Processa broadcast UDP interno USUARIO_CAIU.
+   * Todos os lideres ATIVOS limpam o usuario de suas memorias locais (incluindo grupos cross-shard),
+   * replicando a remocao de forma idempotente para suas replicas STANDBY.
+   */
+  public void processarUsuarioCaiu(String idEvento, String nomeUsuario) {
+    if (!"ATIVO".equalsIgnoreCase(this.papel) || nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
+      return;
+    }
+    String ev = (idEvento != null && !idEvento.trim().isEmpty())
+        ? idEvento.trim()
+        : String.valueOf(System.currentTimeMillis());
+    if (!eventosQuedaProcessados.add(ev + ":" + nomeUsuario.trim().toLowerCase())) {
+      return;
+    }
+    String idIdempotente = "usuario-caiu-" + ev + "-S" + config.getIdShard();
+    Operacao op = Operacao.removerUsuario(idIdempotente, nomeUsuario);
+    Resultado res = gerenciador.aplicar(op);
+    ClusterLog.aviso("GHOST-CLIENT", String.format(
+        "Broadcast UDP USUARIO_CAIU processado no %s para '%s' [ev=%s] -> %s",
+        Particionador.nome(config.getIdShard()), nomeUsuario, ev,
+        res != null ? res.getMensagem() : "sem resposta"));
+    if (res != null && res.isNotificarAtualizacaoUsuarios()) {
+      new Thread(() -> NotificadorClientes.notificarAtualizacaoUsuarios(roteador.coletarTodosUsuariosAtivos()),
+          "Thread-GhostClient-UpdateUsers").start();
+    }
   }
 
   /**

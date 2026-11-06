@@ -38,6 +38,12 @@ public enum TipoMensagemCluster implements Serializable {
   /** Fase 3: operacao encaminhada ao lider do shard dono da chave. */
   ROTEAR_OP,
   /** Fase 3: resposta a uma operacao roteada. */
-  RESP_OP
+  RESP_OP,
+  /** Fase 4: consulta read-only entre shards (scatter-gather LIST/USERS e MEMBERS). */
+  CONSULTA_SHARD,
+  /** Fase 4: resposta de consulta read-only entre shards. */
+  RESP_CONSULTA_SHARD,
+  /** Fase 5: encaminhamento de APDU UDP (SEND, SENDVU, SENDPVT, CONFIRM) ao lider do shard responsavel. */
+  ENCAMINHAR_UDP
 }
 

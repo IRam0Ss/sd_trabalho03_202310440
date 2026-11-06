@@ -10,9 +10,12 @@
 package cluster;
 
 import java.io.Serializable;
+import java.util.ArrayList;
 
+import Protocol.APDU;
 import controller.Operacao;
 import controller.Resultado;
+import utils.InfoUser;
 
 /**
  * Conjunto de payloads trafegados dentro de {@link MensagemCluster} nas mensagens
@@ -93,6 +96,83 @@ public final class MensagensShard {
       this.resultado = resultado;
       this.idLider = idLider;
       this.erro = erro;
+    }
+  }
+
+  /** Tipos de consulta read-only entre shards (Fase 4: LIST, USERS, MEMBERS). */
+  public enum TipoConsulta {
+    LISTAR_GRUPOS,
+    LISTAR_USUARIOS,
+    MEMBROS_GRUPO
+  }
+
+  /** Pedido de leitura direcionado ao lider de um shard especifico. */
+  public static class PedidoConsulta implements Serializable {
+    private static final long serialVersionUID = 1L;
+    public final String idCorrelacao;
+    public final int shardDestino;
+    public final TipoConsulta tipo;
+    public final String parametro;
+    public final String hostResposta;
+    public final int portaResposta;
+    public final int shardOrigem;
+    public final int idNoOrigem;
+
+    public PedidoConsulta(String idCorrelacao, int shardDestino, TipoConsulta tipo, String parametro,
+        String hostResposta, int portaResposta, int shardOrigem, int idNoOrigem) {
+      this.idCorrelacao = idCorrelacao;
+      this.shardDestino = shardDestino;
+      this.tipo = tipo;
+      this.parametro = parametro;
+      this.hostResposta = hostResposta;
+      this.portaResposta = portaResposta;
+      this.shardOrigem = shardOrigem;
+      this.idNoOrigem = idNoOrigem;
+    }
+  }
+
+  /** Resposta de leitura devolvida pelo shard consultado. */
+  public static class RespostaConsulta implements Serializable {
+    private static final long serialVersionUID = 1L;
+    public final String idCorrelacao;
+    public final Status status;
+    public final int idLider;
+    public final ArrayList<String> grupos;
+    public final ArrayList<InfoUser> usuarios;
+    public final String erro;
+
+    public RespostaConsulta(String idCorrelacao, Status status, int idLider, ArrayList<String> grupos,
+        ArrayList<InfoUser> usuarios, String erro) {
+      this.idCorrelacao = idCorrelacao;
+      this.status = status;
+      this.idLider = idLider;
+      this.grupos = grupos;
+      this.usuarios = usuarios;
+      this.erro = erro;
+    }
+  }
+
+  /**
+   * Envelope de encaminhamento de datagrama APDU UDP (Fase 5: SEND, SENDVU, SENDPVT, CONFIRM)
+   * preservando integralmente o IP e a porta UDP originais do cliente remetente.
+   */
+  public static class PacoteUdpRoteado implements Serializable {
+    private static final long serialVersionUID = 1L;
+    public final String idPacote;
+    public final int shardDestino;
+    public final APDU apdu;
+    public final String ipCliente;
+    public final int portaUdpCliente;
+    public final int saltos;
+
+    public PacoteUdpRoteado(String idPacote, int shardDestino, APDU apdu,
+        String ipCliente, int portaUdpCliente, int saltos) {
+      this.idPacote = idPacote;
+      this.shardDestino = shardDestino;
+      this.apdu = apdu;
+      this.ipCliente = ipCliente;
+      this.portaUdpCliente = portaUdpCliente;
+      this.saltos = saltos;
     }
   }
 }

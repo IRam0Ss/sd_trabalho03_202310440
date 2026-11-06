@@ -12,10 +12,16 @@ package cluster;
 import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.TreeMap;
+import java.util.TreeSet;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -24,12 +30,16 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
 import cluster.MensagensShard.AnuncioShard;
+import cluster.MensagensShard.PedidoConsulta;
 import cluster.MensagensShard.PedidoRoteado;
+import cluster.MensagensShard.RespostaConsulta;
 import cluster.MensagensShard.RespostaRoteada;
 import cluster.MensagensShard.Status;
+import cluster.MensagensShard.TipoConsulta;
 import controller.GerenciadorGrupos;
 import controller.Operacao;
 import controller.Resultado;
+import utils.InfoUser;
 
 /**
  * Camada de comunicacao ENTRE shards (a eleicao/replicacao continua estritamente intra-shard).
@@ -57,6 +67,8 @@ public class RoteadorShards {
   }
 
   public static final long TIMEOUT_PADRAO_MS = 3000;
+  /** Timeout curto (2s) para scatter-gather resiliente de LIST e USERS (Teorema CAP: disponibilidade parcial). */
+  public static final long TIMEOUT_SCATTER_MS = 2000;
   private static final long TIMEOUT_TENTATIVA_MS = 1200;
   private static final String TAG = "ROTEAMENTO";
 
@@ -69,6 +81,7 @@ public class RoteadorShards {
   private final String host;
 
   private final Map<String, CompletableFuture<RespostaRoteada>> pendentes = new ConcurrentHashMap<>();
+  private final Map<String, CompletableFuture<RespostaConsulta>> consultasPendentes = new ConcurrentHashMap<>();
   private final Map<String, Resultado> dedup = java.util.Collections.synchronizedMap(
       new LinkedHashMap<String, Resultado>(256, 0.75f, false) {
         private static final long serialVersionUID = 1L;
@@ -84,7 +97,8 @@ public class RoteadorShards {
     t.setDaemon(true);
     return t;
   });
-  private final boolean[] shardOnline = new boolean[Particionador.NUM_SHARDS];
+  private final Boolean[] shardOnline = new Boolean[Particionador.NUM_SHARDS];
+  private final long inicioMs = System.currentTimeMillis();
   private volatile boolean executando = true;
 
   private static class Conexao {
@@ -110,11 +124,8 @@ public class RoteadorShards {
     this.gerenciador = gerenciador;
     this.ctx = ctx;
     this.meuShard = config.getIdShard();
-    this.totalReplicas = Math.max(1, config.getNos().size());
+    this.totalReplicas = Math.max(2, config.getNos().size());
     this.host = config.getMeuNoInfo().host;
-    for (int i = 0; i < shardOnline.length; i++) {
-      shardOnline[i] = true; // evita log espurio na partida; a 1a varredura corrige
-    }
   }
 
   public TabelaLideres getTabela() {
@@ -174,9 +185,20 @@ public class RoteadorShards {
   }
 
   private void verificarTransicoes() {
+    // Aguarda janela inicial de eleicao pioneira antes de notificar estado dos shards
+    if (System.currentTimeMillis() - inicioMs < 2500) {
+      return;
+    }
     for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
       boolean online = tabela.getLider(s) > 0;
-      if (online != shardOnline[s]) {
+      if (shardOnline[s] == null) {
+        shardOnline[s] = online;
+        if (online) {
+          ClusterLog.info(TAG, "Shard " + Particionador.nome(s) + " ONLINE. Lider: replica " + (tabela.getLider(s) - 1)
+              + " (TCP=" + PortasShard.tcp(s, tabela.getLider(s) - 1)
+              + ", Cluster=" + PortasShard.cluster(s, tabela.getLider(s) - 1) + ").");
+        }
+      } else if (online != shardOnline[s].booleanValue()) {
         shardOnline[s] = online;
         if (online) {
           ClusterLog.info(TAG, "Shard " + Particionador.nome(s) + " ONLINE. Lider: replica " + (tabela.getLider(s) - 1)
@@ -266,6 +288,21 @@ public class RoteadorShards {
           CompletableFuture<RespostaRoteada> f = pendentes.get(r.idCorrelacao);
           if (f != null) {
             f.complete(r);
+          }
+        }
+        break;
+      case CONSULTA_SHARD:
+        if (msg.getPayload() instanceof PedidoConsulta) {
+          final PedidoConsulta pc = (PedidoConsulta) msg.getPayload();
+          pool.submit(() -> tratarConsulta(pc));
+        }
+        break;
+      case RESP_CONSULTA_SHARD:
+        if (msg.getPayload() instanceof RespostaConsulta) {
+          RespostaConsulta rc = (RespostaConsulta) msg.getPayload();
+          CompletableFuture<RespostaConsulta> fc = consultasPendentes.get(rc.idCorrelacao);
+          if (fc != null) {
+            fc.complete(rc);
           }
         }
         break;
@@ -430,5 +467,332 @@ public class RoteadorShards {
       }
     }
     return -1;
+  }
+
+  public int getMeuShard() {
+    return meuShard;
+  }
+
+  public int getMinhaReplica() {
+    return config.getIdReplica();
+  }
+
+  // =========================================================================
+  // FASE 4: CONSULTAS READ-ONLY, SCATTER-GATHER RESILIENTE E BROADCASTS
+  // =========================================================================
+
+  /** Resultado tipado para consulta roteada de MEMBERS. */
+  public static class ResultadoMembros {
+    public final boolean sucesso;
+    public final List<InfoUser> membros;
+    public final String erro;
+
+    public ResultadoMembros(boolean sucesso, List<InfoUser> membros, String erro) {
+      this.sucesso = sucesso;
+      this.membros = (membros != null) ? membros : Collections.emptyList();
+      this.erro = erro;
+    }
+  }
+
+  private void tratarConsulta(PedidoConsulta pc) {
+    RespostaConsulta resp;
+    if (pc == null || pc.shardDestino != meuShard) {
+      resp = new RespostaConsulta(pc != null ? pc.idCorrelacao : "", Status.ERRO, -1, null, null,
+          "Consulta destinada a outro shard");
+    } else if (!"ATIVO".equalsIgnoreCase(ctx.papel())) {
+      int lider = ctx.idLiderAtivo();
+      boolean conhece = lider > 0 && lider != config.getMeuId();
+      resp = new RespostaConsulta(pc.idCorrelacao, conhece ? Status.REDIRECIONAR : Status.NAO_ATIVO,
+          conhece ? lider : -1, null, null, null);
+    } else {
+      ArrayList<String> grupos = null;
+      ArrayList<InfoUser> usuarios = null;
+      switch (pc.tipo) {
+        case LISTAR_GRUPOS:
+          grupos = new ArrayList<>(gerenciador.listarGrupos());
+          break;
+        case LISTAR_USUARIOS:
+          usuarios = new ArrayList<>(gerenciador.getTodosUsuariosAtivos());
+          break;
+        case MEMBROS_GRUPO:
+          usuarios = new ArrayList<>(gerenciador.getTodosMembros(pc.parametro));
+          break;
+        default:
+          break;
+      }
+      resp = new RespostaConsulta(pc.idCorrelacao, Status.OK, config.getMeuId(), grupos, usuarios, null);
+    }
+    enviarPara(pc.hostResposta, pc.portaResposta, criarMsg(TipoMensagemCluster.RESP_CONSULTA_SHARD, resp));
+  }
+
+  /**
+   * Consulta read-only ao lider de um shard especifico (com redirecionamento e fail-fast quando offline).
+   * Retorna null se a particao estiver inacessivel dentro do prazo.
+   */
+  public RespostaConsulta consultarShard(int shardDestino, TipoConsulta tipo, String parametro, long timeoutMs) {
+    Particionador.validarShard(shardDestino);
+
+    // Atalho zero-hop se este proprio no for o lider ATIVO do shard consultado
+    if (shardDestino == meuShard && "ATIVO".equalsIgnoreCase(ctx.papel())) {
+      ArrayList<String> grupos = null;
+      ArrayList<InfoUser> usuarios = null;
+      if (tipo == TipoConsulta.LISTAR_GRUPOS) {
+        grupos = new ArrayList<>(gerenciador.listarGrupos());
+      } else if (tipo == TipoConsulta.LISTAR_USUARIOS) {
+        usuarios = new ArrayList<>(gerenciador.getTodosUsuariosAtivos());
+      } else if (tipo == TipoConsulta.MEMBROS_GRUPO) {
+        usuarios = new ArrayList<>(gerenciador.getTodosMembros(parametro));
+      }
+      return new RespostaConsulta("local", Status.OK, config.getMeuId(), grupos, usuarios, null);
+    }
+
+    final String corr = UUID.randomUUID().toString();
+    final long limite = System.currentTimeMillis() + timeoutMs;
+    final Set<Integer> tentados = new HashSet<>();
+    int rodadasConexaoFalha = 0;
+    boolean algumNoVivo = false;
+
+    final PedidoConsulta pedido = new PedidoConsulta(corr, shardDestino, tipo, parametro,
+        host, config.getMeuNoInfo().portaCluster, meuShard, config.getMeuId());
+
+    try {
+      while (System.currentTimeMillis() < limite && executando) {
+        int alvo = tabela.getLider(shardDestino);
+        if (alvo <= 0 || tentados.contains(alvo)) {
+          alvo = proximoCandidato(shardDestino, tentados);
+        }
+        if (alvo <= 0) {
+          if (!algumNoVivo) {
+            rodadasConexaoFalha++;
+            // Se TODAS as replicas do shard recusaram conexao TCP em 2 varreduras, o shard esta offline (fail-fast)
+            if (rodadasConexaoFalha >= 2) {
+              break;
+            }
+          }
+          algumNoVivo = false;
+          tentados.clear();
+          Thread.sleep(120);
+          continue;
+        }
+
+        CompletableFuture<RespostaConsulta> fc = new CompletableFuture<>();
+        consultasPendentes.put(corr, fc);
+
+        boolean enviado = enviar(shardDestino, alvo, criarMsg(TipoMensagemCluster.CONSULTA_SHARD, pedido));
+        if (!enviado) {
+          tentados.add(alvo);
+          tabela.invalidar(shardDestino, alvo);
+          continue;
+        }
+        algumNoVivo = true;
+
+        RespostaConsulta rc;
+        try {
+          long espera = Math.min(800, Math.max(50, limite - System.currentTimeMillis()));
+          rc = fc.get(espera, TimeUnit.MILLISECONDS);
+        } catch (java.util.concurrent.TimeoutException | java.util.concurrent.ExecutionException te) {
+          tentados.add(alvo);
+          tabela.invalidar(shardDestino, alvo);
+          continue;
+        }
+
+        if (rc.status == Status.OK) {
+          return rc;
+        } else if (rc.status == Status.REDIRECIONAR) {
+          tentados.clear();
+          tentados.add(alvo);
+          tabela.invalidar(shardDestino, alvo);
+          tabela.sugerir(shardDestino, rc.idLider);
+        } else {
+          tentados.add(alvo);
+          tabela.invalidar(shardDestino, alvo);
+        }
+      }
+    } catch (InterruptedException ie) {
+      Thread.currentThread().interrupt();
+    } finally {
+      consultasPendentes.remove(corr);
+    }
+    return null;
+  }
+
+  /**
+   * Scatter-Gather resiliente para o comando LIST (timeout curto: 2s).
+   * Se um shard estiver totalmente offline, agrega os demais e retorna resposta parcial sem travar.
+   */
+  public List<String> listarGruposGlobal() {
+    long t0 = System.currentTimeMillis();
+    List<CompletableFuture<RespostaConsulta>> futuros = new ArrayList<>();
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      final int shard = s;
+      futuros.add(CompletableFuture.supplyAsync(
+          () -> consultarShard(shard, TipoConsulta.LISTAR_GRUPOS, null, TIMEOUT_SCATTER_MS), pool));
+    }
+
+    Set<String> agregados = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+    List<String> shardsOk = new ArrayList<>();
+    List<String> shardsOff = new ArrayList<>();
+
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      try {
+        long restante = Math.max(50, (t0 + TIMEOUT_SCATTER_MS) - System.currentTimeMillis());
+        RespostaConsulta rc = futuros.get(s).get(restante, TimeUnit.MILLISECONDS);
+        if (rc != null && rc.status == Status.OK && rc.grupos != null) {
+          agregados.addAll(rc.grupos);
+          shardsOk.add("S" + s);
+        } else {
+          shardsOff.add(Particionador.nome(s));
+        }
+      } catch (Exception e) {
+        shardsOff.add(Particionador.nome(s));
+      }
+    }
+
+    if (shardsOff.isEmpty()) {
+      ClusterLog.info("SCATTER-GATHER", String.format(
+          "LIST roteado e agregado com sucesso dos 3 shards %s em %dms -> %d grupo(s).",
+          shardsOk, (System.currentTimeMillis() - t0), agregados.size()));
+    } else {
+      ClusterLog.aviso("SCATTER-GATHER", String.format(
+          "LIST parcial em %dms: particao(oes) %s offline/timeout -> respondendo com shards disponiveis %s (%d grupo(s)).",
+          (System.currentTimeMillis() - t0), shardsOff, shardsOk, agregados.size()));
+    }
+    return new ArrayList<>(agregados);
+  }
+
+  /**
+   * Scatter-Gather resiliente para o comando USERS e notificacoes globais UPDATE_USERS (timeout curto: 2s).
+   * Retorna os objetos InfoUser de todos os shards alcancaveis sem bloquear o cliente se uma particao cair.
+   */
+  public List<InfoUser> coletarTodosUsuariosAtivos() {
+    long t0 = System.currentTimeMillis();
+    List<CompletableFuture<RespostaConsulta>> futuros = new ArrayList<>();
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      final int shard = s;
+      futuros.add(CompletableFuture.supplyAsync(
+          () -> consultarShard(shard, TipoConsulta.LISTAR_USUARIOS, null, TIMEOUT_SCATTER_MS), pool));
+    }
+
+    Map<String, InfoUser> porNome = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+    List<String> shardsOk = new ArrayList<>();
+    List<String> shardsOff = new ArrayList<>();
+
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      try {
+        long restante = Math.max(50, (t0 + TIMEOUT_SCATTER_MS) - System.currentTimeMillis());
+        RespostaConsulta rc = futuros.get(s).get(restante, TimeUnit.MILLISECONDS);
+        if (rc != null && rc.status == Status.OK && rc.usuarios != null) {
+          for (InfoUser u : rc.usuarios) {
+            if (u != null && u.getNome() != null) {
+              porNome.put(u.getNome().trim(), u);
+            }
+          }
+          shardsOk.add("S" + s);
+        } else {
+          shardsOff.add(Particionador.nome(s));
+        }
+      } catch (Exception e) {
+        shardsOff.add(Particionador.nome(s));
+      }
+    }
+
+    if (shardsOff.isEmpty()) {
+      ClusterLog.info("SCATTER-GATHER", String.format(
+          "USERS roteado e agregado com sucesso dos 3 shards %s em %dms -> %d usuario(s) online.",
+          shardsOk, (System.currentTimeMillis() - t0), porNome.size()));
+    } else {
+      ClusterLog.aviso("SCATTER-GATHER", String.format(
+          "USERS parcial em %dms: particao(oes) %s offline/timeout -> respondendo com shards disponiveis %s (%d usuario(s)).",
+          (System.currentTimeMillis() - t0), shardsOff, shardsOk, porNome.size()));
+    }
+    return new ArrayList<>(porNome.values());
+  }
+
+  /**
+   * Consulta roteada para MEMBERS: direciona estritamente ao shard dono do grupo.
+   */
+  public ResultadoMembros listarMembrosGrupo(String nomeGrupo) {
+    int shardGrupo = Particionador.shardDe(nomeGrupo);
+    ClusterLog.info(TAG, "Consultando MEMBERS do grupo '" + nomeGrupo + "' no " + Particionador.nome(shardGrupo));
+    RespostaConsulta rc = consultarShard(shardGrupo, TipoConsulta.MEMBROS_GRUPO, nomeGrupo, 2500);
+    if (rc == null || rc.status != Status.OK) {
+      return new ResultadoMembros(false, Collections.emptyList(),
+          "Particao " + Particionador.nome(shardGrupo) + " indisponivel no momento");
+    }
+    List<InfoUser> lista = (rc.usuarios != null) ? new ArrayList<>(rc.usuarios) : new ArrayList<>();
+    lista.sort(Comparator.comparing(u -> u.getNome() != null ? u.getNome().toLowerCase() : ""));
+    return new ResultadoMembros(true, lista, null);
+  }
+
+  /**
+   * Broadcast assincrono global de BLOCK / UNBLOCK para todos os demais shards,
+   * mantendo a tabela de bloqueios replicada em todas as particoes para leitura local O(1) em SEND.
+   */
+  public void replicarBloqueioGlobalAssincrono(boolean bloquear, String idReqBase,
+      String usuarioOrigem, String usuarioAlvo, int shardJaAplicado) {
+    final String base = (idReqBase != null && !idReqBase.trim().isEmpty())
+        ? idReqBase.trim()
+        : ("blk-" + UUID.randomUUID());
+
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      if (s == shardJaAplicado) continue;
+      final int shardAlvo = s;
+      pool.submit(() -> {
+        String reqShard = base + "-S" + shardAlvo;
+        Operacao opCopia = bloquear
+            ? Operacao.bloquear(reqShard, usuarioOrigem, usuarioAlvo)
+            : Operacao.desbloquear(reqShard, usuarioOrigem, usuarioAlvo);
+        Resultado r = executar(shardAlvo, opCopia, 2000);
+        if (r.isSucesso()) {
+          ClusterLog.info("BLOCK:GLOBAL", String.format(
+              "%s ('%s' -> '%s') replicado assincronamente com sucesso no %s.",
+              (bloquear ? "BLOCK" : "UNBLOCK"), usuarioOrigem, usuarioAlvo, Particionador.nome(shardAlvo)));
+        } else {
+          ClusterLog.aviso("BLOCK:GLOBAL", String.format(
+              "Nao foi possivel replicar %s para %s (particao possivelmente offline: %s).",
+              (bloquear ? "BLOCK" : "UNBLOCK"), Particionador.nome(shardAlvo), r.getMensagem()));
+        }
+      });
+    }
+  }
+
+  /**
+   * Remove um usuario (LOGOUT / LEAVE GLOBAL) sincronamente no shard dono do cadastro
+   * e assincronamente nos demais shards para limpeza imediata de salas cross-shard.
+   */
+  public Resultado removerUsuarioGlobal(String idReqBase, String nomeUsuario) {
+    int shardDono = Particionador.shardDe(nomeUsuario);
+    final String base = (idReqBase != null && !idReqBase.trim().isEmpty())
+        ? idReqBase.trim()
+        : ("logout-" + UUID.randomUUID());
+
+    Resultado resPrincipal = executar(shardDono, Operacao.removerUsuario(base + "-S" + shardDono, nomeUsuario), TIMEOUT_PADRAO_MS);
+
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      if (s == shardDono) continue;
+      final int shardExtra = s;
+      pool.submit(() -> executar(shardExtra, Operacao.removerUsuario(base + "-S" + shardExtra, nomeUsuario), 2000));
+    }
+    return resPrincipal;
+  }
+
+  /**
+   * Trata a queda brusca de conexao TCP (Ghost Client): dispara broadcast UDP interno USUARIO_CAIU
+   * para todos os lideres e tambem encaminha limpeza idempotente (mesmo idEvento) aos shards alcancaveis.
+   */
+  public void tratarQuedaBruscaUsuario(String nomeUsuario) {
+    if (nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
+      return;
+    }
+    final String idEvento = UUID.randomUUID().toString().substring(0, 8);
+    BeaconClusterLAN.dispararBroadcastUsuarioCaiu(idEvento, nomeUsuario, meuShard, config.getIdReplica());
+
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      final int shard = s;
+      pool.submit(() -> {
+        String idIdempotente = "usuario-caiu-" + idEvento + "-S" + shard;
+        executar(shard, Operacao.removerUsuario(idIdempotente, nomeUsuario), 2000);
+      });
+    }
   }
 }

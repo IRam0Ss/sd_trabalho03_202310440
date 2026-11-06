@@ -12,6 +12,7 @@ package model;
 import java.net.ServerSocket;
 import java.net.Socket;
 
+import cluster.RoteadorShards;
 import controller.GerenciadorGrupos;
 import controller.AtendimentoCliente;
 
@@ -26,18 +27,28 @@ public class ServidorTCP implements Runnable {
 
   private final int porta;
   private final GerenciadorGrupos gerenciador;
+  private final RoteadorShards roteador;
   private volatile boolean executando = true;
   private ServerSocket servidorTCP;
 
   /**
-   * Construtor do ServidorTCP.
-   * 
-   * @param porta       A porta TCP a ser escutada.
-   * @param gerenciador O gerenciador compartilhado de grupos e usuarios.
+   * Construtor legado/monolitico do ServidorTCP.
    */
   public ServidorTCP(int porta, GerenciadorGrupos gerenciador) {
+    this(porta, gerenciador, null);
+  }
+
+  /**
+   * Construtor particionado (T#03) do ServidorTCP com Proxy Transparente inter-shards.
+   * 
+   * @param porta       A porta TCP a ser escutada.
+   * @param gerenciador O gerenciador compartilhado desta particao.
+   * @param roteador    O roteador inter-shards (ou null em modo isolado).
+   */
+  public ServidorTCP(int porta, GerenciadorGrupos gerenciador, RoteadorShards roteador) {
     this.porta = porta;
     this.gerenciador = gerenciador;
+    this.roteador = roteador;
   }
 
   /**
@@ -72,7 +83,8 @@ public class ServidorTCP implements Runnable {
           System.out.println(
               "[SERVIDOR:TCP] [INFO] Nova conexao recebida de " + conexaoClienteTCP.getInetAddress().getHostAddress());
 
-          Thread threadAtendimentoCliente = new Thread(new AtendimentoCliente(conexaoClienteTCP, gerenciador));
+          Thread threadAtendimentoCliente = new Thread(
+              new AtendimentoCliente(conexaoClienteTCP, gerenciador, roteador));
           threadAtendimentoCliente.setDaemon(true);
           threadAtendimentoCliente.start();
         } catch (Exception ex) {

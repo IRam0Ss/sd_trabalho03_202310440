@@ -244,9 +244,13 @@ public class CanalCluster {
             if (obj instanceof MensagemCluster) {
               MensagemCluster msg = (MensagemCluster) obj;
 
-              // Fase 3: trafego inter-shard nao participa do consenso; segue direto ao roteador
+              // Fase 3/4/5: trafego inter-shard nao participa do consenso; segue direto ao roteador
               if (receptorInterShard != null && (msg.getTipo() == TipoMensagemCluster.ANUNCIO_SHARD
-                  || msg.getTipo() == TipoMensagemCluster.ROTEAR_OP || msg.getTipo() == TipoMensagemCluster.RESP_OP)) {
+                  || msg.getTipo() == TipoMensagemCluster.ROTEAR_OP
+                  || msg.getTipo() == TipoMensagemCluster.RESP_OP
+                  || msg.getTipo() == TipoMensagemCluster.CONSULTA_SHARD
+                  || msg.getTipo() == TipoMensagemCluster.RESP_CONSULTA_SHARD
+                  || msg.getTipo() == TipoMensagemCluster.ENCAMINHAR_UDP)) {
                 receptorInterShard.accept(msg);
                 continue;
               }

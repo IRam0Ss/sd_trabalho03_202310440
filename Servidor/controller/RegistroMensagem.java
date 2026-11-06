@@ -27,6 +27,8 @@ public class RegistroMensagem implements Serializable {
   private final String idMensagem;
   private final String nomeGrupo;
   private final String autor;
+  private final String ipAutor;
+  private final int portaAutor;
   private final boolean privado;
   private final Set<String> destinatariosEsperados;
   private final Set<String> destinatariosEntregues;
@@ -39,9 +41,19 @@ public class RegistroMensagem implements Serializable {
    * Construtor para mensagem de grupo.
    */
   public RegistroMensagem(String idMensagem, String nomeGrupo, String autor, Set<String> destinatariosEsperados, long timestamp) {
+    this(idMensagem, nomeGrupo, autor, null, 0, destinatariosEsperados, timestamp);
+  }
+
+  /**
+   * Construtor para mensagem de grupo com endpoint do autor (para devolucao direta de ticks cross-shard).
+   */
+  public RegistroMensagem(String idMensagem, String nomeGrupo, String autor, String ipAutor, int portaAutor,
+      Set<String> destinatariosEsperados, long timestamp) {
     this.idMensagem = idMensagem;
     this.nomeGrupo = nomeGrupo;
     this.autor = autor;
+    this.ipAutor = ipAutor;
+    this.portaAutor = portaAutor;
     this.privado = false;
     this.destinatariosEsperados = (destinatariosEsperados != null) ? new HashSet<>(destinatariosEsperados) : new HashSet<>();
     this.destinatariosEntregues = new HashSet<>();
@@ -55,9 +67,18 @@ public class RegistroMensagem implements Serializable {
    * Construtor para mensagem privada.
    */
   public RegistroMensagem(String idMensagem, String destinatario, String autor, long timestamp) {
+    this(idMensagem, destinatario, autor, null, 0, timestamp);
+  }
+
+  /**
+   * Construtor para mensagem privada com endpoint do autor (ticks salvos no Shard do Destinatario).
+   */
+  public RegistroMensagem(String idMensagem, String destinatario, String autor, String ipAutor, int portaAutor, long timestamp) {
     this.idMensagem = idMensagem;
     this.nomeGrupo = "@" + destinatario;
     this.autor = autor;
+    this.ipAutor = ipAutor;
+    this.portaAutor = portaAutor;
     this.privado = true;
     this.destinatariosEsperados = new HashSet<>();
     if (destinatario != null && !destinatario.trim().isEmpty()) {
@@ -80,6 +101,14 @@ public class RegistroMensagem implements Serializable {
 
   public String getAutor() {
     return autor;
+  }
+
+  public String getIpAutor() {
+    return ipAutor;
+  }
+
+  public int getPortaAutor() {
+    return portaAutor;
   }
 
   public boolean isPrivado() {

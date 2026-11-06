@@ -2,154 +2,186 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/06/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 05/11/2026
 * Nome...............: Principal
-* Funcao.............: Ponto de entrada do Servidor com suporte a cluster dinamico, auto-atribuicao de ID e console interativo.
+* Funcao.............: Ponto de entrada do Servidor T#03 com particionamento em 3 Shards e calculo dinamico de portas.
 *************************************************************** */
 
 import java.util.Scanner;
+import java.util.UUID;
 
 import cluster.BeaconClusterLAN;
 import cluster.ClusterLog;
 import cluster.ConfigCluster;
 import cluster.NoCluster;
 import cluster.Particionador;
-import cluster.VisaoCluster;
-import controller.AtendimentoCliente;
+import cluster.PortasShard;
 import controller.GerenciadorGrupos;
+import controller.Operacao;
+import controller.Resultado;
 import utils.LogEstruturado;
 
 /**
- * Ponto de entrada do servidor E.D.E.N. com suporte a redundancia (N servidores).
- * Oferece atribuicao automatica de ID (sem necessidade de digitacao manual),
- * suporte a cluster aberto e infinito, e comandos interativos de depuracao:
- * status, estado, ajuda e sair.
+ * Ponto de entrada do servidor E.D.E.N. (Trabalho 03 - Particionamento + Replicacao).
+ * Exige ou le interativamente {@code idShard} (0..2) e {@code idReplica} (0..N), aplicando:
+ * <ul>
+ *   <li>TCP        = 5000 + (idShard * 100) + idReplica</li>
+ *   <li>UDP        = 6000 + (idShard * 100) + idReplica</li>
+ *   <li>ClusterLAN = 7000 + (idShard * 100) + idReplica</li>
+ * </ul>
+ * Uso via linha de comando:
+ * <pre>
+ *   java -cp Servidor/bin Principal &lt;ID_SHARD 0..2&gt; &lt;ID_REPLICA 0..N&gt; [TOTAL_REPLICAS=2]
+ *   java -cp Servidor/bin Principal --local &lt;ID_SHARD 0..2&gt; &lt;ID_REPLICA 0..N&gt; [TOTAL_REPLICAS=2]
+ *   java -cp Servidor/bin Principal --rede  &lt;ID_SHARD 0..2&gt; &lt;ID_REPLICA 0..N&gt;
+ * </pre>
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 4.0
+ * @version 5.0
  */
 public class Principal {
 
   public static void main(String[] args) {
     System.setProperty("java.net.preferIPv4Stack", "true");
 
-    ConfigCluster config = null;
-    BeaconClusterLAN beaconLAN = null;
     Scanner scanner = new Scanner(System.in);
+    ConfigCluster config = null;
+
+    int idShard = -1;
+    int idReplica = -1;
+    int totalReplicas = 2;
+    boolean modoRede = false;
 
     try {
-      if (args.length >= 2 && ehInteiro(args[0]) && ehInteiro(args[1])) {
-        // Modo T#03: java Principal <ID_SHARD> <ID_REPLICA> [TOTAL_REPLICAS=2]
-        int idShard = Integer.parseInt(args[0]);
-        int idReplica = Integer.parseInt(args[1]);
-        int totalReplicas = (args.length >= 3 && ehInteiro(args[2])) ? Integer.parseInt(args[2]) : 2;
-        LogEstruturado.instalar(idShard, idReplica);
-        config = ConfigCluster.gerarConfigShard(idShard, idReplica, totalReplicas);
+      if (args.length == 0) {
+        // Modo interativo T#03: solicita explicitamente idShard (0..2) e idReplica (0..N)
+        imprimirBannerInicial();
+        idShard = lerInteiroIntervalo(scanner,
+            "Informe o ID do Shard [0=A..I | 1=J..R | 2=S..Z]: ", 0, Particionador.NUM_SHARDS - 1);
+        mostrarDicaReplicasLocais(idShard);
+        idReplica = lerInteiroIntervalo(scanner,
+            "Informe o ID da Replica [0=Primaria, 1=Standby, ...]: ", 0, PortasShard.MAX_REPLICAS - 1);
 
-      } else if (args.length >= 1) {
-        String flag = args[0].toLowerCase();
+        System.out.print("Modo de execucao [1=LOCAL 127.0.0.1 (Padrao) | 2=REDE LAN] (ENTER para LOCAL): ");
+        String linhaModo = scanner.hasNextLine() ? scanner.nextLine().trim() : "";
+        modoRede = ("2".equals(linhaModo) || "rede".equalsIgnoreCase(linhaModo) || "lan".equalsIgnoreCase(linhaModo));
 
-        if ("--local".equals(flag)) {
-          Integer idForcado = (args.length >= 2) ? Integer.parseInt(args[1]) : null;
-          if (args.length >= 3) {
-            // Suporte legado a scripts de teste: --local <id> <total>
-            int id = Integer.parseInt(args[1]);
-            int total = Integer.parseInt(args[2]);
-            config = ConfigCluster.gerarConfigLocal(id, total);
-          } else {
-            config = ConfigCluster.descobrirEConfigurarLocal(idForcado);
+      } else if ("--local".equalsIgnoreCase(args[0])) {
+        modoRede = false;
+        if (args.length >= 3 && ehInteiro(args[1]) && ehInteiro(args[2])) {
+          idShard = Integer.parseInt(args[1]);
+          idReplica = Integer.parseInt(args[2]);
+          if (args.length >= 4 && ehInteiro(args[3])) {
+            totalReplicas = Integer.parseInt(args[3]);
           }
-
-        } else if ("--rede".equals(flag) || "--lan".equals(flag)) {
-          Integer idForcado = (args.length >= 2) ? Integer.parseInt(args[1]) : null;
-          config = ConfigCluster.descobrirEConfigurarRede(idForcado);
-
+        } else if (args.length == 1) {
+          imprimirBannerInicial();
+          idShard = lerInteiroIntervalo(scanner,
+              "Informe o ID do Shard [0=A..I | 1=J..R | 2=S..Z]: ", 0, Particionador.NUM_SHARDS - 1);
+          mostrarDicaReplicasLocais(idShard);
+          idReplica = lerInteiroIntervalo(scanner,
+              "Informe o ID da Replica [0=Primaria, 1=Standby, ...]: ", 0, PortasShard.MAX_REPLICAS - 1);
         } else {
-          // Argumento numerico legado ou arquivo properties: <id> [arquivo]
-          try {
-            int id = Integer.parseInt(args[0]);
-            String arquivo = (args.length >= 2) ? args[1] : "cluster.properties";
-            config = ConfigCluster.carregarArquivo(arquivo, id);
-          } catch (NumberFormatException nfe) {
-            config = ConfigCluster.descobrirEConfigurarLocal(null);
-          }
+          imprimirUsoESair("Parametros insuficientes para --local.");
+        }
+
+      } else if ("--rede".equalsIgnoreCase(args[0]) || "--lan".equalsIgnoreCase(args[0])) {
+        modoRede = true;
+        if (args.length >= 3 && ehInteiro(args[1]) && ehInteiro(args[2])) {
+          idShard = Integer.parseInt(args[1]);
+          idReplica = Integer.parseInt(args[2]);
+        } else if (args.length == 1) {
+          imprimirBannerInicial();
+          idShard = lerInteiroIntervalo(scanner,
+              "Informe o ID do Shard [0=A..I | 1=J..R | 2=S..Z]: ", 0, Particionador.NUM_SHARDS - 1);
+          idReplica = lerInteiroIntervalo(scanner,
+              "Informe o ID da Replica [0=Primaria, 1=Standby, ...]: ", 0, PortasShard.MAX_REPLICAS - 1);
+        } else {
+          imprimirUsoESair("Parametros insuficientes para --rede.");
+        }
+
+      } else if (args.length >= 2 && ehInteiro(args[0]) && ehInteiro(args[1])) {
+        // Uso direto padrao: java Principal <ID_SHARD> <ID_REPLICA> [TOTAL_REPLICAS]
+        idShard = Integer.parseInt(args[0]);
+        idReplica = Integer.parseInt(args[1]);
+        if (args.length >= 3 && ehInteiro(args[2])) {
+          totalReplicas = Integer.parseInt(args[2]);
         }
 
       } else {
-        // Modo interativo amigavel sem solicitar IDs ou quantidades manuais
-        System.out.println("==================================================");
-        System.out.println("        E.D.E.N. - SERVIDOR DISTRIBUIDO           ");
-        System.out.println("==================================================");
-        System.out.println("Selecione o modo de execucao:");
-        System.out.println("  [1] REDE  - Maquinas distintas na rede local LAN (Padrao)");
-        System.out.println("  [2] LOCAL - Mesma maquina (atribuicao automatica de portas e ID)");
-        System.out.print("Escolha [1/2] (Pressione ENTER para REDE): ");
+        imprimirUsoESair("Argumentos invalidos: informe obrigatoriamente <ID_SHARD 0..2> e <ID_REPLICA 0..N>.");
+      }
 
-        String linha = scanner.hasNextLine() ? scanner.nextLine().trim() : "";
-        if ("2".equals(linha) || "local".equalsIgnoreCase(linha)) {
-          config = ConfigCluster.descobrirEConfigurarLocal(null);
-        } else {
-          config = ConfigCluster.descobrirEConfigurarRede(null);
-        }
+      // Valida limites antes de instalar o log
+      Particionador.validarShard(idShard);
+      if (idReplica < 0 || idReplica >= PortasShard.MAX_REPLICAS) {
+        throw new IllegalArgumentException(
+            "ID_REPLICA fora do intervalo permitido: " + idReplica + " (esperado 0.." + (PortasShard.MAX_REPLICAS - 1) + ")");
+      }
+
+      // Instala log estruturado com prefixo [SHARD-x | REPLICA-y | PAPEL] e cores ANSI
+      LogEstruturado.instalar(idShard, idReplica);
+
+      if (modoRede) {
+        config = ConfigCluster.configurarRedeShard(idShard, idReplica);
+      } else {
+        config = ConfigCluster.gerarConfigShard(idShard, idReplica, totalReplicas);
       }
 
     } catch (Exception e) {
-      if (args.length >= 2 && ehInteiro(args[0]) && ehInteiro(args[1])) {
-        System.err.println("[INICIO] [ERRO] Argumentos de shard invalidos: " + e.getMessage()
-            + "\nUso: java Principal <ID_SHARD 0..2> <ID_REPLICA> [TOTAL_REPLICAS=2]");
-        System.exit(1);
-      }
-      System.err.println("[INICIO] [AVISO] Falha ao processar argumentos (" + e.getMessage() + "). Assumindo auto-configuracao de rede.");
-      config = ConfigCluster.descobrirEConfigurarRede(null);
+      System.err.println("[CONFIG] [ERRO] Falha ao inicializar servidor: " + e.getMessage());
+      imprimirUsoESair(null);
     }
 
-    GerenciadorGrupos gerenciador = new GerenciadorGrupos();
+    GerenciadorGrupos gerenciador = new GerenciadorGrupos(config.getIdShard());
     NoCluster noCluster = new NoCluster(config, gerenciador);
-    if (args.length >= 2 && ehInteiro(args[0]) && ehInteiro(args[1])) {
-      LogEstruturado.definirFornecedorPapel(noCluster::getPapel);
-      System.out.println("Shard " + Particionador.nome(config.getIdShard()) + " pronto. Tabela de particao:\n"
-          + Particionador.descricao());
-    }
+    LogEstruturado.definirFornecedorPapel(noCluster::getPapel);
 
-    // Se estiver rodando em modo rede, ativa o beacon de broadcast UDP para novos nos
-    if (!"127.0.0.1".equals(config.getMeuNoInfo().host)) {
-      beaconLAN = new BeaconClusterLAN(config, new BeaconClusterLAN.ListenerNovoParLAN() {
-        @Override
-        public void onNovoParDescoberto(ConfigCluster.NoInfo novoPar) {
-          noCluster.getVisao().adicionarParSeAusente(novoPar);
-          noCluster.getCanal().adicionarParSeAusente(novoPar.id, novoPar.host, novoPar.portaCluster);
+    System.out.println("Particao ativa neste processo: " + Particionador.nome(config.getIdShard()));
+
+    // Ativa o Beacon UDP filtrado estritamente por idShard para auto-descoberta de replicas do MESMO shard
+    final ConfigCluster finalConfig = config;
+    BeaconClusterLAN beaconShard = new BeaconClusterLAN(config, new BeaconClusterLAN.ListenerNovoParLAN() {
+      @Override
+      public void onNovoParDescoberto(ConfigCluster.NoInfo novoPar) {
+        if (novoPar == null || novoPar.idShard != finalConfig.getIdShard()) {
+          return;
         }
+        noCluster.getVisao().adicionarParSeAusente(novoPar);
+        noCluster.getCanal().adicionarParSeAusente(novoPar.id, novoPar.host, novoPar.portaCluster);
+      }
 
-        @Override
-        public void onParSaindo(int idPar) {
-          ClusterLog.info("BEACON:LAN", "No " + idPar + " anunciou saida via broadcast LAN.");
-          noCluster.getVisao().marcarDown(idPar);
-          if (idPar == noCluster.getIdLiderAtivo()) {
-            ClusterLog.eleicao("Lider ativo anunciou saida da rede. Disparando eleicao imediata!");
-            noCluster.dispararEleicao();
-          }
+      @Override
+      public void onParSaindo(int idPar) {
+        ClusterLog.info("BEACON:SHARD", "Replica " + (idPar - 1) + " (No " + idPar + ") anunciou saida do Shard S"
+            + finalConfig.getIdShard() + ".");
+        noCluster.getVisao().marcarDown(idPar);
+        if (idPar == noCluster.getIdLiderAtivo()) {
+          ClusterLog.eleicao("Lider ativo do Shard S" + finalConfig.getIdShard() + " anunciou saida. Disparando eleicao imediata!");
+          noCluster.dispararEleicao();
         }
-      });
-      beaconLAN.iniciar();
-    }
+      }
 
-    final BeaconClusterLAN finalBeacon = beaconLAN;
+      @Override
+      public void onUsuarioCaiu(String idEvento, String nomeUsuario) {
+        noCluster.processarUsuarioCaiu(idEvento, nomeUsuario);
+      }
+    });
+    beaconShard.iniciar();
 
-    // Registra shutdown hook para saida graciosa e failover imediato
+    // Registra shutdown hook para saida graciosa e failover imediato dentro do shard
     Runtime.getRuntime().addShutdownHook(new Thread(() -> {
       System.out.println("\n[SISTEMA] Sinal de encerramento detectado. Finalizando no...");
-      if (finalBeacon != null) {
-        finalBeacon.parar();
-      }
+      beaconShard.parar();
       noCluster.encerrar();
     }));
 
-    // Inicia o cluster
+    // Inicia consenso intra-shard e roteador inter-shard
     noCluster.iniciar();
 
-    System.out.println("\n[SISTEMA] Servidor iniciado com sucesso. Digite 'status' ou 'ajuda' para comandos de depuracao.\n");
+    System.out.println("[SISTEMA] Servidor iniciado. Digite 'status', 'lideres', 'shards', 'estado', 'ajuda' ou 'sair'.");
 
-    // Loop interativo de comandos de console para demonstracao e debug (D5)
+    // Loop interativo de comandos de console para demonstracao e debug
     while (true) {
       try {
         if (!scanner.hasNextLine()) {
@@ -165,15 +197,15 @@ public class Principal {
         if (comando.isEmpty()) continue;
 
         if (comando.startsWith("rotear ")) {
-          // Depuracao Fase 3: rotear <shard> <usuario> [idRequisicao]  (REGISTER roteado ao shard dono)
+          // Depuracao Fase 3: rotear <shard> <usuario> [idRequisicao]
           String[] t = linhaCmd.split("\\s+");
           if (t.length >= 3 && ehInteiro(t[1])) {
             final int shardAlvo = Integer.parseInt(t[1]);
             final String usuario = t[2];
-            final String idReq = (t.length >= 4) ? t[3] : "dbg-" + java.util.UUID.randomUUID();
+            final String idReq = (t.length >= 4) ? t[3] : "dbg-" + UUID.randomUUID();
             new Thread(() -> {
-              controller.Resultado r = noCluster.getRoteador().executar(shardAlvo,
-                  controller.Operacao.registrarUsuario(idReq, usuario, "127.0.0.1", 0));
+              Resultado r = noCluster.getRoteador().executar(shardAlvo,
+                  Operacao.registrarUsuario(idReq, usuario, "127.0.0.1", 0));
               System.out.println("[ROTEAMENTO] RESULTADO shard=" + shardAlvo + " usuario=" + usuario + " -> "
                   + (r.isSucesso() ? "SUCESSO" : "FALHA") + " | " + r.getMensagem());
             }, "Thread-Console-Rotear").start();
@@ -210,7 +242,7 @@ public class Principal {
           case "exit":
           case "quit":
             System.out.println("[SISTEMA] Encerrando o servidor...");
-            if (finalBeacon != null) finalBeacon.parar();
+            beaconShard.parar();
             noCluster.encerrar();
             System.exit(0);
             break;
@@ -230,7 +262,70 @@ public class Principal {
     }
   }
 
+  private static void imprimirBannerInicial() {
+    System.out.println("==========================================================");
+    System.out.println("   E.D.E.N. - SERVIDOR DISTRIBUIDO PARTICIONADO (T#03)    ");
+    System.out.println("==========================================================");
+    System.out.print(Particionador.descricao());
+    System.out.println("----------------------------------------------------------");
+  }
+
+  private static void mostrarDicaReplicasLocais(int idShard) {
+    StringBuilder emUso = new StringBuilder();
+    int primeiraLivre = -1;
+    for (int r = 0; r < 6; r++) {
+      boolean ativa = ConfigCluster.isPortaEmUso("127.0.0.1", PortasShard.cluster(idShard, r));
+      if (ativa) {
+        if (emUso.length() > 0) emUso.append(", ");
+        emUso.append("R").append(r);
+      } else if (primeiraLivre < 0) {
+        primeiraLivre = r;
+      }
+    }
+    if (emUso.length() > 0) {
+      System.out.println("  [Dica Shard S" + idShard + "] Replicas ja ativas localmente: " + emUso
+          + " | Proxima replica livre sugerida: " + primeiraLivre);
+    } else {
+      System.out.println("  [Dica Shard S" + idShard + "] Nenhuma replica ativa localmente. Sugestao para lider primario: 0");
+    }
+  }
+
+  private static int lerInteiroIntervalo(Scanner scanner, String prompt, int min, int max) {
+    while (true) {
+      System.out.print(prompt);
+      if (!scanner.hasNextLine()) {
+        imprimirUsoESair("Entrada padrao encerrada sem informar parametros obrigatorios.");
+      }
+      String linha = scanner.nextLine().trim();
+      if (ehInteiro(linha)) {
+        int val = Integer.parseInt(linha);
+        if (val >= min && val <= max) {
+          return val;
+        }
+      }
+      System.out.println("  Valor invalido! Digite um numero inteiro entre " + min + " e " + max + ".");
+    }
+  }
+
+  private static void imprimirUsoESair(String motivo) {
+    if (motivo != null && !motivo.isEmpty()) {
+      System.err.println("[CONFIG] [ERRO] " + motivo);
+    }
+    System.err.println("\nUso correto (T#03 - 3 Shards x N Replicas):");
+    System.err.println("  java -cp Servidor/bin Principal <ID_SHARD 0..2> <ID_REPLICA 0..N> [TOTAL_REPLICAS=2]");
+    System.err.println("  Exemplos para subir os 3 lideres independentes (S0, S1 e S2):");
+    System.err.println("    java -cp Servidor/bin Principal 0 0   # Shard S0 [A..I] -> TCP=5000, UDP=6000, Cluster=7000");
+    System.err.println("    java -cp Servidor/bin Principal 1 0   # Shard S1 [J..R] -> TCP=5100, UDP=6100, Cluster=7100");
+    System.err.println("    java -cp Servidor/bin Principal 2 0   # Shard S2 [S..Z] -> TCP=5200, UDP=6200, Cluster=7200");
+    System.err.println("  Exemplos para subir os 3 standbys:");
+    System.err.println("    java -cp Servidor/bin Principal 0 1   # Shard S0 [A..I] -> TCP=5001, UDP=6001, Cluster=7001");
+    System.err.println("    java -cp Servidor/bin Principal 1 1   # Shard S1 [J..R] -> TCP=5101, UDP=6101, Cluster=7101");
+    System.err.println("    java -cp Servidor/bin Principal 2 1   # Shard S2 [S..Z] -> TCP=5201, UDP=6201, Cluster=7201\n");
+    System.exit(1);
+  }
+
   private static boolean ehInteiro(String s) {
+    if (s == null || s.isEmpty()) return false;
     try {
       Integer.parseInt(s);
       return true;
@@ -241,10 +336,10 @@ public class Principal {
 
   private static void exibirShards(ConfigCluster config) {
     System.out.println("Particao da ED (3 shards fixos):\n" + Particionador.descricao()
-        + "Este no: shard " + config.getIdShard() + ", replica " + config.getIdReplica());
+        + "Este no: Shard S" + config.getIdShard() + " | Replica " + config.getIdReplica());
     for (ConfigCluster.NoInfo n : config.getNos().values()) {
-      System.out.println("  replica " + n.idReplica + " -> TCP " + n.portaTcp + " | UDP " + n.portaUdp
-          + " | Cluster " + n.portaCluster + (n.id == config.getMeuId() ? "  (este no)" : ""));
+      System.out.println("  Replica " + n.idReplica + " -> TCP=" + n.portaTcp + ", UDP=" + n.portaUdp
+          + ", Cluster=" + n.portaCluster + (n.id == config.getMeuId() ? "  (este no)" : ""));
     }
   }
 
@@ -262,13 +357,13 @@ public class Principal {
 
   private static void exibirAjuda() {
     System.out.println("\nComandos disponiveis no console:");
-    System.out.println("  status / cluster - Exibe tabela visual do cluster, papeis, epocas, versoes e saude.");
-    System.out.println("  estado           - Exibe dump da estrutura de dados replicada (usuarios, salas, ticks).");
-    System.out.println("  lideres          - Exibe a tabela de lideres de cada shard (visao deste no).");
+    System.out.println("  status / cluster - Exibe tabela visual do shard local, papeis, epocas, versoes e saude.");
+    System.out.println("  estado           - Exibe dump da estrutura de dados replicada neste shard.");
+    System.out.println("  lideres          - Exibe a tabela de lideres dos 3 shards (S0, S1, S2).");
     System.out.println("  rotear <s> <usr> - Depuracao: registra <usr> no shard <s> via roteamento inter-shard.");
     System.out.println("  shards           - Exibe a tabela de particao (A..I, J..R, S..Z) e as portas do shard local.");
     System.out.println("  ajuda            - Mostra esta mensagem de ajuda.");
-    System.out.println("  sair             - Encerra este no graciosamente com failover imediato para os outros.\n");
+    System.out.println("  sair             - Encerra este no graciosamente com failover imediato no shard.\n");
   }
 
 }

@@ -13,24 +13,34 @@ import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.EOFException;
 import java.net.Socket;
+import java.util.Collection;
 import java.util.List;
+import java.util.UUID;
+
 import Protocol.APDU;
+import cluster.ClusterLog;
+import cluster.Particionador;
+import cluster.RoteadorShards;
 import utils.InfoUser;
 import utils.Protocolo;
 import model.NotificadorClientes;
 
 /**
  * Classe responsavel por atender clientes individuais via conexao TCP concorrente.
- * Cada conexao de cliente executa em uma thread independente, processando objetos {@link APDU}.
+ * Na arquitetura particionada (T#03), atua como Proxy Transparente no Servidor:
+ * o cliente e a APDU permanecem intactos, enquanto cada comando e roteado para o lider
+ * do Shard responsavel (A..I -> S0, J..R -> S1, S..Z -> S2), com Scatter-Gather resiliente
+ * em LIST/USERS, replicacao global assincrona em BLOCK/UNBLOCK e broadcast UDP USUARIO_CAIU.
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 2.0
+ * @version 3.0
  * @since 15/06/2026
  */
 public class AtendimentoCliente implements Runnable {
 
   private Socket conexao;
   private GerenciadorGrupos gerenciador;
+  private final RoteadorShards roteador;
   private InfoUser usuarioAssociado = null;
   private ObjectOutputStream saidaObjetos;
 
@@ -42,14 +52,26 @@ public class AtendimentoCliente implements Runnable {
   }
 
   /**
-   * Construtor do AtendimentoCliente.
+   * Construtor padrao/legado do AtendimentoCliente (sem roteador inter-shard).
    * 
    * @param conexao     Socket TCP da conexao atual
    * @param gerenciador Referencia ao gerenciador de grupos e usuarios
    */
   public AtendimentoCliente(Socket conexao, GerenciadorGrupos gerenciador) {
+    this(conexao, gerenciador, null);
+  }
+
+  /**
+   * Construtor particionado (T#03) com Proxy Transparente inter-shard.
+   * 
+   * @param conexao     Socket TCP da conexao atual
+   * @param gerenciador Referencia ao gerenciador local da particao
+   * @param roteador    Roteador inter-shard (pode ser null em modo standalone)
+   */
+  public AtendimentoCliente(Socket conexao, GerenciadorGrupos gerenciador, RoteadorShards roteador) {
     this.conexao = conexao;
     this.gerenciador = gerenciador;
+    this.roteador = roteador;
     try {
       this.saidaObjetos = new ObjectOutputStream(conexao.getOutputStream());
       this.saidaObjetos.flush();
@@ -88,10 +110,20 @@ public class AtendimentoCliente implements Runnable {
       try {
         if (this.usuarioAssociado != null && this.usuarioAssociado.getNome() != null) {
           String nome = this.usuarioAssociado.getNome();
-          System.out.println("[ATENDIMENTO] [CLEANUP] Cliente '" + nome + "' encerrou conexao TCP bruscamente. Limpando sessoes e grupos...");
-          Resultado res = this.gerenciador.desconectarClienteInativo(nome, this);
-          if (res != null && res.isNotificarAtualizacaoUsuarios()) {
-            NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+          if (this.roteador != null) {
+            if (this.gerenciador.encerrarSessaoLocalSeAtiva(nome, this)) {
+              ClusterLog.erro("GHOST-CLIENT", "Queda brusca TCP detectada para '" + nome
+                  + "'. Disparando broadcast UDP interno USUARIO_CAIU para todos os shards...");
+              this.roteador.tratarQuedaBruscaUsuario(nome);
+              dispararUpdateUsuariosGlobal();
+            }
+          } else {
+            System.out.println("[ATENDIMENTO] [CLEANUP] Cliente '" + nome
+                + "' encerrou conexao TCP bruscamente. Limpando sessoes e grupos...");
+            Resultado res = this.gerenciador.desconectarClienteInativo(nome, this);
+            if (res != null && res.isNotificarAtualizacaoUsuarios()) {
+              NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+            }
           }
         }
       } catch (Exception e) {
@@ -185,11 +217,35 @@ public class AtendimentoCliente implements Runnable {
           this.usuarioAssociado = usuarioJoin;
         }
 
-        Operacao opJoin = Operacao.entrarGrupo(apdu.getIdRequisicao(), grupoJoin, apdu.getNomeUsuario(), ipJoin, apdu.getPortaClienteUDP());
-        Resultado resJoin = this.gerenciador.aplicar(opJoin);
+        int shardGrupoJoin = Particionador.shardDe(grupoJoin);
+        if (this.roteador != null) {
+          ClusterLog.info("PROXY:TCP", String.format("Roteando JOIN de '%s' no grupo '%s' -> %s",
+              apdu.getNomeUsuario(), grupoJoin, Particionador.nome(shardGrupoJoin)));
+        }
+        Operacao opJoin = Operacao.entrarGrupo(
+            apdu.getIdRequisicao(), grupoJoin, apdu.getNomeUsuario(), ipJoin, apdu.getPortaClienteUDP());
+        Resultado resJoin = executarNoShard(shardGrupoJoin, opJoin);
         enviarResposta(resJoin.getOperacaoRetorno(), resJoin.getMensagem());
         if (resJoin.isNotificarAtualizacaoUsuarios()) {
-          NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+          dispararUpdateUsuariosGlobal();
+        }
+        // Compatibilidade clientes T#01 (que enviam JOIN sem REGISTER previo) quando shardUsuario != shardGrupo
+        if (this.roteador != null && resJoin.isSucesso() && apdu.getNomeUsuario() != null) {
+          final int shardUsr = Particionador.shardDe(apdu.getNomeUsuario());
+          if (shardUsr != shardGrupoJoin) {
+            final String idAutoReg = "autoreg-"
+                + (apdu.getIdRequisicao() != null ? apdu.getIdRequisicao() : UUID.randomUUID().toString())
+                + "-S" + shardUsr;
+            final String nomeAuto = apdu.getNomeUsuario();
+            final int portaUdpAuto = apdu.getPortaClienteUDP();
+            new Thread(() -> {
+              Resultado rAuto = this.roteador.executar(
+                  shardUsr, Operacao.registrarUsuario(idAutoReg, nomeAuto, ipJoin, portaUdpAuto), 2000);
+              if (rAuto != null && rAuto.isNotificarAtualizacaoUsuarios()) {
+                dispararUpdateUsuariosGlobal();
+              }
+            }, "Thread-AutoReg-CrossShard").start();
+          }
         }
         System.out.println("[ATENDIMENTO] [INFO] Processamento de JOIN de '" + apdu.getNomeUsuario() + "' concluido.");
         break;
@@ -201,23 +257,39 @@ public class AtendimentoCliente implements Runnable {
           this.usuarioAssociado = usuarioRegister;
         }
 
-        Operacao opReg = Operacao.registrarUsuario(apdu.getIdRequisicao(), apdu.getNomeUsuario(), ipReg, apdu.getPortaClienteUDP());
-        Resultado resReg = this.gerenciador.aplicar(opReg);
+        int shardReg = Particionador.shardDe(apdu.getNomeUsuario());
+        if (this.roteador != null) {
+          ClusterLog.info("PROXY:TCP", String.format("Roteando REGISTER de '%s' -> %s",
+              apdu.getNomeUsuario(), Particionador.nome(shardReg)));
+        }
+        Operacao opReg = Operacao.registrarUsuario(
+            apdu.getIdRequisicao(), apdu.getNomeUsuario(), ipReg, apdu.getPortaClienteUDP());
+        Resultado resReg = executarNoShard(shardReg, opReg);
         enviarResposta(resReg.getOperacaoRetorno(), resReg.getMensagem());
         if (resReg.isNotificarAtualizacaoUsuarios()) {
-          NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+          dispararUpdateUsuariosGlobal();
         }
         System.out.println("[ATENDIMENTO] [INFO] Processamento de REGISTER de '" + apdu.getNomeUsuario() + "' concluido.");
         break;
 
       case Protocolo.LOGOUT:
-        Operacao opLogout = Operacao.removerUsuario(apdu.getIdRequisicao(), apdu.getNomeUsuario());
-        Resultado resLogout = this.gerenciador.aplicar(opLogout);
         this.gerenciador.desvincularSessao(apdu.getNomeUsuario(), this);
         this.usuarioAssociado = null;
-        enviarResposta(resLogout.getOperacaoRetorno(), resLogout.getMensagem());
-        if (resLogout.isNotificarAtualizacaoUsuarios()) {
-          NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+        if (this.roteador != null) {
+          Resultado resLogout = this.roteador.removerUsuarioGlobal(apdu.getIdRequisicao(), apdu.getNomeUsuario());
+          if (resLogout.isSucesso()) {
+            enviarResposta(resLogout.getOperacaoRetorno(), resLogout.getMensagem());
+          } else {
+            enviarResposta(Protocolo.OK, "Desconectado com sucesso");
+          }
+          dispararUpdateUsuariosGlobal();
+        } else {
+          Operacao opLogout = Operacao.removerUsuario(apdu.getIdRequisicao(), apdu.getNomeUsuario());
+          Resultado resLogout = this.gerenciador.aplicar(opLogout);
+          enviarResposta(resLogout.getOperacaoRetorno(), resLogout.getMensagem());
+          if (resLogout.isNotificarAtualizacaoUsuarios()) {
+            NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+          }
         }
         System.out.println("[ATENDIMENTO] [INFO] Processamento de LOGOUT de '" + apdu.getNomeUsuario() + "' concluido.");
         break;
@@ -225,34 +297,49 @@ public class AtendimentoCliente implements Runnable {
       case Protocolo.LEAVE:
         String grupoLeave = apdu.getNomeGrupo();
         if (grupoLeave != null && !grupoLeave.equalsIgnoreCase("GLOBAL")) {
+          int shardLeave = Particionador.shardDe(grupoLeave);
+          if (this.roteador != null) {
+            ClusterLog.info("PROXY:TCP", String.format("Roteando LEAVE de '%s' no grupo '%s' -> %s",
+                apdu.getNomeUsuario(), grupoLeave, Particionador.nome(shardLeave)));
+          }
           Operacao opLeave = Operacao.sairGrupo(apdu.getIdRequisicao(), grupoLeave, apdu.getNomeUsuario());
-          Resultado resLeave = this.gerenciador.aplicar(opLeave);
+          Resultado resLeave = executarNoShard(shardLeave, opLeave);
           enviarResposta(resLeave.getOperacaoRetorno(), resLeave.getMensagem());
           System.out.println("[ATENDIMENTO] [INFO] Processamento de LEAVE de '" + apdu.getNomeUsuario() + "' concluido.");
         } else {
-          Operacao opLeaveGlobal = Operacao.removerUsuario(apdu.getIdRequisicao(), apdu.getNomeUsuario());
-          Resultado resLeaveGlobal = this.gerenciador.aplicar(opLeaveGlobal);
           this.gerenciador.desvincularSessao(apdu.getNomeUsuario(), this);
           this.usuarioAssociado = null;
-          enviarResposta(Protocolo.OK, "Desconectado do servidor");
-          if (resLeaveGlobal.isNotificarAtualizacaoUsuarios()) {
-            NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+          if (this.roteador != null) {
+            this.roteador.removerUsuarioGlobal(apdu.getIdRequisicao(), apdu.getNomeUsuario());
+            enviarResposta(Protocolo.OK, "Desconectado do servidor");
+            dispararUpdateUsuariosGlobal();
+          } else {
+            Operacao opLeaveGlobal = Operacao.removerUsuario(apdu.getIdRequisicao(), apdu.getNomeUsuario());
+            Resultado resLeaveGlobal = this.gerenciador.aplicar(opLeaveGlobal);
+            enviarResposta(Protocolo.OK, "Desconectado do servidor");
+            if (resLeaveGlobal.isNotificarAtualizacaoUsuarios()) {
+              NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+            }
           }
         }
         break;
 
       case Protocolo.LIST:
-        List<String> grupos = this.gerenciador.listarGrupos();
+        List<String> grupos = (this.roteador != null)
+            ? this.roteador.listarGruposGlobal()
+            : this.gerenciador.listarGrupos();
         if (grupos.isEmpty()) {
           enviarResposta(Protocolo.OK, "");
         } else {
           enviarResposta(Protocolo.OK, String.join(",", grupos));
         }
-        System.out.println("[ATENDIMENTO] [INFO] Processamento de LIST concluido.");
+        System.out.println("[ATENDIMENTO] [INFO] Processamento de LIST concluido (" + grupos.size() + " grupos).");
         break;
 
       case Protocolo.USERS:
-        java.util.Set<InfoUser> usuarios = this.gerenciador.getTodosUsuariosAtivos();
+        Collection<InfoUser> usuarios = (this.roteador != null)
+            ? this.roteador.coletarTodosUsuariosAtivos()
+            : this.gerenciador.getTodosUsuariosAtivos();
         StringBuilder sb = new StringBuilder();
         boolean first = true;
         for (InfoUser u : usuarios) {
@@ -268,16 +355,33 @@ public class AtendimentoCliente implements Runnable {
 
       case Protocolo.MEMBERS:
         String grupoList = apdu.getNomeGrupo();
-        List<InfoUser> membrosGrupo = this.gerenciador.getTodosMembros(grupoList);
-        StringBuilder sbMembers = new StringBuilder();
-        boolean firstMember = true;
-        for (InfoUser u : membrosGrupo) {
-          if (!firstMember)
-            sbMembers.append(",");
-          sbMembers.append(u.getNome());
-          firstMember = false;
+        if (this.roteador != null) {
+          RoteadorShards.ResultadoMembros rm = this.roteador.listarMembrosGrupo(grupoList);
+          if (!rm.sucesso) {
+            enviarResposta(Protocolo.ERRO, rm.erro);
+            break;
+          }
+          StringBuilder sbMembers = new StringBuilder();
+          boolean firstMember = true;
+          for (InfoUser u : rm.membros) {
+            if (!firstMember)
+              sbMembers.append(",");
+            sbMembers.append(u.getNome());
+            firstMember = false;
+          }
+          enviarResposta(Protocolo.OK, sbMembers.toString());
+        } else {
+          List<InfoUser> membrosGrupo = this.gerenciador.getTodosMembros(grupoList);
+          StringBuilder sbMembers = new StringBuilder();
+          boolean firstMember = true;
+          for (InfoUser u : membrosGrupo) {
+            if (!firstMember)
+              sbMembers.append(",");
+            sbMembers.append(u.getNome());
+            firstMember = false;
+          }
+          enviarResposta(Protocolo.OK, sbMembers.toString());
         }
-        enviarResposta(Protocolo.OK, sbMembers.toString());
         System.out.println(
             "[ATENDIMENTO] [INFO] Processamento de MEMBERS concluido para grupo: " + grupoList);
         break;
@@ -285,8 +389,7 @@ public class AtendimentoCliente implements Runnable {
       case Protocolo.BLOCK:
         String usuarioABloquear = apdu.getDestinatario();
         String bloqueador = apdu.getNomeUsuario();
-        Operacao opBlock = Operacao.bloquear(apdu.getIdRequisicao(), bloqueador, usuarioABloquear);
-        Resultado resBlock = this.gerenciador.aplicar(opBlock);
+        Resultado resBlock = executarBloqueioGlobal(true, apdu.getIdRequisicao(), bloqueador, usuarioABloquear);
         enviarResposta(resBlock.getOperacaoRetorno(), resBlock.getMensagem());
         System.out.println("[ATENDIMENTO] [INFO] Usuario '" + bloqueador + "' bloqueou '" + usuarioABloquear + "'");
         break;
@@ -294,8 +397,7 @@ public class AtendimentoCliente implements Runnable {
       case Protocolo.UNBLOCK:
         String usuarioADesbloquear = apdu.getDestinatario();
         String desbloqueador = apdu.getNomeUsuario();
-        Operacao opUnblock = Operacao.desbloquear(apdu.getIdRequisicao(), desbloqueador, usuarioADesbloquear);
-        Resultado resUnblock = this.gerenciador.aplicar(opUnblock);
+        Resultado resUnblock = executarBloqueioGlobal(false, apdu.getIdRequisicao(), desbloqueador, usuarioADesbloquear);
         enviarResposta(resUnblock.getOperacaoRetorno(), resUnblock.getMensagem());
         System.out.println("[ATENDIMENTO] [INFO] Usuario '" + desbloqueador + "' desbloqueou '" + usuarioADesbloquear + "'");
         break;
@@ -305,5 +407,70 @@ public class AtendimentoCliente implements Runnable {
         enviarResposta(Protocolo.ERRO, "Comando desconhecido: " + comando);
         break;
     }
+  }
+
+  /**
+   * Roteia a operacao para o lider do shard responsavel (Proxy Transparente) ou aplica localmente em modo isolado.
+   */
+  private Resultado executarNoShard(int shardAlvo, Operacao op) {
+    if (this.roteador != null) {
+      return this.roteador.executar(shardAlvo, op);
+    }
+    return this.gerenciador.aplicar(op);
+  }
+
+  /**
+   * Executa BLOCK/UNBLOCK sincronamente em uma particao primaria e dispara broadcast assincrono
+   * para os demais shards (tabela de bloqueios replicada globalmente).
+   */
+  private Resultado executarBloqueioGlobal(boolean bloquear, String idReq, String origem, String alvo) {
+    if (this.roteador == null) {
+      Operacao opLocal = bloquear
+          ? Operacao.bloquear(idReq, origem, alvo)
+          : Operacao.desbloquear(idReq, origem, alvo);
+      return this.gerenciador.aplicar(opLocal);
+    }
+
+    String baseReq = (idReq != null && !idReq.trim().isEmpty())
+        ? idReq.trim()
+        : ("blk-" + UUID.randomUUID());
+    int shardPrimario = Particionador.shardDe(origem);
+    String reqPrim = baseReq + "-S" + shardPrimario;
+    Operacao opPrim = bloquear
+        ? Operacao.bloquear(reqPrim, origem, alvo)
+        : Operacao.desbloquear(reqPrim, origem, alvo);
+
+    Resultado res = this.roteador.executar(shardPrimario, opPrim);
+    int shardAplicado = shardPrimario;
+
+    // Fallback: se o shard do bloqueador estiver offline mas este gateway estiver ATIVO, aplica no shard local
+    if (!res.isSucesso() && shardPrimario != this.roteador.getMeuShard()
+        && origem != null && !origem.trim().isEmpty() && alvo != null && !alvo.trim().isEmpty()) {
+      shardAplicado = this.roteador.getMeuShard();
+      String reqFallback = baseReq + "-S" + shardAplicado;
+      Operacao opFallback = bloquear
+          ? Operacao.bloquear(reqFallback, origem, alvo)
+          : Operacao.desbloquear(reqFallback, origem, alvo);
+      res = this.roteador.executar(shardAplicado, opFallback);
+    }
+
+    if (res.isSucesso()) {
+      this.roteador.replicarBloqueioGlobalAssincrono(bloquear, baseReq, origem, alvo, shardAplicado);
+    }
+    return res;
+  }
+
+  /**
+   * Dispara em background um Scatter-Gather resiliente de usuarios ativos e envia UPDATE_USERS via UDP.
+   */
+  private void dispararUpdateUsuariosGlobal() {
+    if (this.roteador == null) {
+      NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
+      return;
+    }
+    new Thread(() -> {
+      List<InfoUser> todos = this.roteador.coletarTodosUsuariosAtivos();
+      NotificadorClientes.notificarAtualizacaoUsuarios(todos);
+    }, "Thread-Global-UpdateUsers").start();
   }
 }

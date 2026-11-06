@@ -2,9 +2,9 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/06/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 05/11/2026
 * Nome...............: ServidorDiscovery
-* Funcao.............: Farol UDP para descoberta automatica do servidor local e nos do cluster.
+* Funcao.............: Farol UDP para descoberta automatica do servidor local e nos do cluster/shard.
 *************************************************************** */
 
 package model;
@@ -16,12 +16,12 @@ import java.nio.charset.StandardCharsets;
 import utils.Protocolo;
 
 /**
- * Thread de discovery local (farol UDP) com suporte a busca de cluster e compatibilidade legada.
+ * Thread de discovery local (farol UDP) com suporte a busca de cluster/shard e compatibilidade legada.
  * Responde a "SERVIDOR_IP" -> "IP", "DISCOVER_EDEN" -> "EDEN_HERE" e
- * "DISCOVER_EDEN_CLUSTER" -> "EDEN_CLUSTER;id;papel;tcp;udp".
+ * "DISCOVER_EDEN_CLUSTER" -> "EDEN_CLUSTER:id:papel:tcp:udp:idShard".
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 3.0
+ * @version 3.1
  */
 public class ServidorDiscovery implements Runnable {
 
@@ -29,6 +29,7 @@ public class ServidorDiscovery implements Runnable {
   private DatagramSocket socket;
   private volatile boolean executando = true;
   private int idNo = 1;
+  private int idShard = 0;
   private int portaTcp = Protocolo.PORTA_SERVIDOR_TCP;
   private int portaUdp = Protocolo.PORTA_SERVIDOR_UDP;
   private String papel = "ATIVO";
@@ -42,7 +43,12 @@ public class ServidorDiscovery implements Runnable {
   }
 
   public void configurarInfo(int idNo, String papel, int portaTcp, int portaUdp) {
+    configurarInfo(idNo, 0, papel, portaTcp, portaUdp);
+  }
+
+  public void configurarInfo(int idNo, int idShard, String papel, int portaTcp, int portaUdp) {
     this.idNo = idNo;
+    this.idShard = idShard;
     this.papel = papel;
     this.portaTcp = portaTcp;
     this.portaUdp = portaUdp;
@@ -67,7 +73,7 @@ public class ServidorDiscovery implements Runnable {
       socket.setBroadcast(true);
       socket.bind(new InetSocketAddress(porta));
 
-      System.out.println("[DISCOVERY:" + porta + "] Farol UDP ligado na porta " + porta + " aguardando buscas...");
+      System.out.println("[DISCOVERY:" + porta + "] Farol UDP ligado na porta " + porta + " (Shard S" + idShard + ") aguardando buscas...");
       byte[] buffer = new byte[256];
 
       while (executando && !socket.isClosed()) {
@@ -93,7 +99,9 @@ public class ServidorDiscovery implements Runnable {
               pacoteRecebido.getAddress(), pacoteRecebido.getPort());
           socket.send(pacoteResposta);
         } else if (Protocolo.DISCOVER_EDEN_CLUSTER.equalsIgnoreCase(mensagem)) {
-          String respostaCluster = String.format("EDEN_CLUSTER:%d:%s:%d:%d", idNo, papel, portaTcp, portaUdp);
+          // 6o campo (:idShard) mantem total retrocompatibilidade com clientes que leem p.length >= 5
+          String respostaCluster = String.format("EDEN_CLUSTER:%d:%s:%d:%d:%d",
+              idNo, papel, portaTcp, portaUdp, idShard);
           byte[] dadosResposta = respostaCluster.getBytes(StandardCharsets.UTF_8);
           DatagramPacket pacoteResposta = new DatagramPacket(dadosResposta, dadosResposta.length,
               pacoteRecebido.getAddress(), pacoteRecebido.getPort());

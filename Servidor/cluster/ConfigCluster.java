@@ -2,24 +2,19 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 05/11/2026
 * Nome...............: ConfigCluster
-* Funcao.............: Gerenciador de topologia dinamica do cluster com suporte a atribuicao automatica de ID e crescimento infinito.
+* Funcao.............: Configuracao de topologia por Shard (S0, S1, S2) e Replica com calculo deterministico de portas.
 *************************************************************** */
 
 package cluster;
 
-import java.io.BufferedReader;
-import java.io.File;
-import java.io.FileInputStream;
-import java.io.InputStreamReader;
 import java.io.Serializable;
 import java.net.InetSocketAddress;
 import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -27,39 +22,38 @@ import java.util.concurrent.ConcurrentHashMap;
 import utils.Protocolo;
 
 /**
- * Carrega e disponibiliza os metadados de conectividade de cada no do cluster.
- * Suporta atribuicao automatica de IDs (sem intervencao manual do usuario),
- * cluster aberto e infinito que aceita novos membros a qualquer instante,
- * execucao local e distribuicao em rede LAN via auto-descoberta.
+ * Carrega e disponibiliza os metadados de conectividade de cada no dentro do seu Shard (T#03).
+ * Cada instancia pertence obrigatoriamente a um {@code idShard} (0..2) e possui um {@code idReplica} (0..N),
+ * utilizando a matematica deterministica de portas ({@link PortasShard}):
+ * <ul>
+ *   <li>TCP        = 5000 + (idShard * 100) + idReplica</li>
+ *   <li>UDP        = 6000 + (idShard * 100) + idReplica</li>
+ *   <li>ClusterLAN = 7000 + (idShard * 100) + idReplica</li>
+ * </ul>
+ * Apenas nos do MESMO shard sao registrados na tabela de consenso local, garantindo
+ * que S0, S1 e S2 formem tres clusters independentes.
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 2.0
+ * @version 3.0
  */
 public class ConfigCluster implements Serializable {
 
-  private static final long serialVersionUID = 1L;
+  private static final long serialVersionUID = 2L;
 
   /**
-   * Metadados de rede de um no do cluster.
+   * Metadados de rede de um no do shard.
    */
   public static class NoInfo implements Serializable {
-    private static final long serialVersionUID = 1L;
+    private static final long serialVersionUID = 2L;
 
     public final int id;
+    public final int idShard;
+    public final int idReplica;
     public final String host;
     public final int portaCluster;
     public final int portaTcp;
     public final int portaUdp;
     public final int portaDiscovery;
-    /** Shard (0..2) ao qual o no pertence. */
-    public final int idShard;
-    /** Indice da replica dentro do shard (0-based). Participa da formula de portas. */
-    public final int idReplica;
-
-    /** Construtor legado (T#02): assume shard 0 e replica = id-1. */
-    public NoInfo(int id, String host, int portaCluster, int portaTcp, int portaUdp, int portaDiscovery) {
-      this(id, 0, Math.max(0, id - 1), host, portaCluster, portaTcp, portaUdp, portaDiscovery);
-    }
 
     public NoInfo(int id, int idShard, int idReplica, String host, int portaCluster, int portaTcp, int portaUdp,
         int portaDiscovery) {
@@ -75,66 +69,35 @@ public class ConfigCluster implements Serializable {
 
     @Override
     public String toString() {
-      return String.format("No[%d: shard=%d, replica=%d, host=%s, cluster=%d, tcp=%d, udp=%d]", id, idShard, idReplica,
-          host, portaCluster, portaTcp, portaUdp);
+      return String.format("No[S%d/R%d (id=%d): host=%s, tcp=%d, udp=%d, cluster=%d]",
+          idShard, idReplica, id, host, portaTcp, portaUdp, portaCluster);
     }
   }
 
   private final int meuId;
   private final int idShard;
+  private final int idReplica;
   private final Map<Integer, NoInfo> nos;
 
-  public ConfigCluster(int meuId, Map<Integer, NoInfo> nos) {
-    this(meuId, 0, nos);
-  }
-
-  public ConfigCluster(int meuId, int idShard, Map<Integer, NoInfo> nos) {
+  public ConfigCluster(int meuId, int idShard, int idReplica, Map<Integer, NoInfo> nos) {
+    Particionador.validarShard(idShard);
     this.meuId = meuId;
     this.idShard = idShard;
+    this.idReplica = idReplica;
     this.nos = new ConcurrentHashMap<>(nos);
   }
 
-  /** Shard deste no. Eleicao, replicacao e heartbeats so valem entre nos do mesmo shard. */
+  /** Shard deste no (0, 1 ou 2). Eleicao, replicacao e heartbeats ocorrem apenas intra-shard. */
   public int getIdShard() {
     return idShard;
   }
 
   /** Indice (0-based) desta replica dentro do shard. */
   public int getIdReplica() {
-    NoInfo m = getMeuNoInfo();
-    return (m != null) ? m.idReplica : Math.max(0, meuId - 1);
+    return idReplica;
   }
 
-  /**
-   * Gera a configuracao de um no em execucao local (127.0.0.1) para a topologia de shards.
-   * O ID interno do no no cluster do shard e idReplica+1 (IDs positivos, como no T#02);
-   * as portas seguem {@link PortasShard}. Cada no conhece APENAS as replicas do proprio shard,
-   * o que isola eleicao e replicacao entre shards.
-   *
-   * @param idShard        0..2
-   * @param idReplica      0..totalReplicas-1
-   * @param totalReplicas  replicas por shard (demo: 2)
-   */
-  public static ConfigCluster gerarConfigShard(int idShard, int idReplica, int totalReplicas) {
-    Particionador.validarShard(idShard);
-    if (totalReplicas < 1 || totalReplicas > PortasShard.MAX_REPLICAS) {
-      throw new IllegalArgumentException("Total de replicas invalido: " + totalReplicas);
-    }
-    if (idReplica < 0 || idReplica >= totalReplicas) {
-      throw new IllegalArgumentException("ID_REPLICA " + idReplica + " fora do intervalo 0.." + (totalReplicas - 1));
-    }
-    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>();
-    for (int r = 0; r < totalReplicas; r++) {
-      mapa.put(r + 1, new NoInfo(r + 1, idShard, r, "127.0.0.1", PortasShard.cluster(idShard, r),
-          PortasShard.tcp(idShard, r), PortasShard.udp(idShard, r), Protocolo.PORTA_DISCOVERY));
-    }
-    ClusterLog.info("CONFIG:SHARD", String.format(
-        "Shard %s | Replica %d (id interno %d) | Portas: TCP=%d, UDP=%d, Cluster=%d | Replicas do shard: %d",
-        Particionador.nome(idShard), idReplica, idReplica + 1, PortasShard.tcp(idShard, idReplica),
-        PortasShard.udp(idShard, idReplica), PortasShard.cluster(idShard, idReplica), totalReplicas));
-    return new ConfigCluster(idReplica + 1, idShard, mapa);
-  }
-
+  /** ID interno (1-based: idReplica + 1) utilizado na maquina de consenso do proprio shard. */
   public int getMeuId() {
     return meuId;
   }
@@ -150,7 +113,7 @@ public class ConfigCluster implements Serializable {
   public List<NoInfo> getOutrosNos() {
     List<NoInfo> outros = new ArrayList<>();
     for (NoInfo n : nos.values()) {
-      if (n.id != meuId) {
+      if (n.id != meuId && n.idShard == idShard) {
         outros.add(n);
       }
     }
@@ -158,17 +121,28 @@ public class ConfigCluster implements Serializable {
   }
 
   /**
-   * Registra um novo no descoberto dinamicamente durante a execucao do cluster.
+   * Registra dinamicamente um par descoberto durante a execucao, APENAS se pertencer ao mesmo shard.
    */
   public void registrarParDinamico(NoInfo info) {
-    if (info != null && !nos.containsKey(info.id)) {
+    if (info == null) {
+      return;
+    }
+    if (info.idShard != this.idShard) {
+      ClusterLog.aviso("ISOLAMENTO", String.format(
+          "Ignorando registro de par de outro shard (Recebido: S%d/R%d | Meu Shard: S%d).",
+          info.idShard, info.idReplica, this.idShard));
+      return;
+    }
+    if (!nos.containsKey(info.id)) {
       nos.put(info.id, info);
-      ClusterLog.info("CONFIG", "Novo no integrado a topologia: No " + info.id + " (" + info.host + ":" + info.portaCluster + ")");
+      ClusterLog.info("CONFIG", String.format(
+          "Nova replica integrada ao Shard S%d: Replica %d (%s:%d)",
+          info.idShard, info.idReplica, info.host, info.portaCluster));
     }
   }
 
   /**
-   * Testa se uma porta TCP local esta disponivel para bind.
+   * Testa se uma porta TCP esta livre para bind no host informado.
    */
   public static boolean isPortaDisponivel(String host, int porta) {
     try (ServerSocket ss = new ServerSocket()) {
@@ -181,221 +155,123 @@ public class ConfigCluster implements Serializable {
   }
 
   /**
-   * Testa se ha algum servico respondendo em uma porta TCP.
+   * Testa se ha algum servico TCP escutando na porta informada.
    */
   public static boolean isPortaEmUso(String host, int porta) {
     try (Socket s = new Socket()) {
-      s.connect(new InetSocketAddress(host, porta), 100);
+      s.connect(new InetSocketAddress(host, porta), 80);
       return true;
     } catch (Exception e) {
       return false;
     }
   }
 
-  private static Integer carregarIdCacheado(String sufixo) {
-    try {
-      File f = new File(".cluster_node_" + sufixo + ".id");
-      if (f.exists() && f.isFile()) {
-        try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"))) {
-          String linha = br.readLine();
-          if (linha != null && !linha.trim().isEmpty()) {
-            int id = Integer.parseInt(linha.trim());
-            if (id > 0) return id;
-          }
-        }
-      }
-    } catch (Exception ignored) {}
-    return null;
-  }
-
-  private static void salvarIdCacheado(String sufixo, int id) {
-    try {
-      File f = new File(".cluster_node_" + sufixo + ".id");
-      try (java.io.FileOutputStream fos = new java.io.FileOutputStream(f)) {
-        fos.write(String.valueOf(id).getBytes("UTF-8"));
-      }
-    } catch (Exception ignored) {}
-  }
-
   /**
-   * Atribui automaticamente o ID local e descobre os outros nos locais ativos
-   * na mesma maquina escaneando os offsets de porta.
-   * 
-   * @param idForcado ID opcional forcado por linha de comando (se null, detecta automaticamente).
-   * @return Objeto ConfigCluster pronto para uso.
+   * Configura um no em modo LOCAL (127.0.0.1) para (idShard, idReplica) aplicando estritamente
+   * a matematica de portas e isolando os membros por shard.
+   *
+   * @param idShard        Identificador do shard (0=A..I, 1=J..R, 2=S..Z).
+   * @param idReplica      Identificador da replica no shard (0..N).
+   * @param totalReplicas  Quantidade esperada de replicas no shard (padrao: 2).
+   * @return ConfigCluster isolado para o shard informado.
    */
-  public static ConfigCluster descobrirEConfigurarLocal(Integer idForcado) {
-    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>();
-    int idEscolhido = -1;
-
-    if (idForcado != null && idForcado > 0) {
-      idEscolhido = idForcado;
-    } else {
-      // Escaneia os IDs de 1 a 100 para encontrar o primeiro disponivel
-      for (int k = 1; k <= 100; k++) {
-        int portaCluster = 9000 + k;
-        if (!isPortaEmUso("127.0.0.1", portaCluster)) {
-          idEscolhido = k;
-          break;
-        }
-      }
-      if (idEscolhido <= 0) {
-        idEscolhido = 1;
-      }
+  public static ConfigCluster gerarConfigShard(int idShard, int idReplica, int totalReplicas) {
+    Particionador.validarShard(idShard);
+    if (idReplica < 0 || idReplica >= PortasShard.MAX_REPLICAS) {
+      throw new IllegalArgumentException(
+          "ID_REPLICA invalido: " + idReplica + " (esperado 0.." + (PortasShard.MAX_REPLICAS - 1) + ")");
+    }
+    if (totalReplicas < 1 || totalReplicas > PortasShard.MAX_REPLICAS) {
+      throw new IllegalArgumentException("Total de replicas invalido: " + totalReplicas);
     }
 
-    // Registra o proprio no
-    int minhaPortaCluster = 9000 + idEscolhido;
-    int minhaPortaTcp = 6789 + 10 * (idEscolhido - 1);
-    int minhaPortaUdp = 7777 + 10 * (idEscolhido - 1);
-    int minhaPortaDisc = Protocolo.PORTA_DISCOVERY;
-    NoInfo meuInfo = new NoInfo(idEscolhido, "127.0.0.1", minhaPortaCluster, minhaPortaTcp, minhaPortaUdp, minhaPortaDisc);
-    mapa.put(idEscolhido, meuInfo);
+    int minhaPortaTcp = PortasShard.tcp(idShard, idReplica);
+    int minhaPortaUdp = PortasShard.udp(idShard, idReplica);
+    int minhaPortaCluster = PortasShard.cluster(idShard, idReplica);
 
-    // Detecta outros nos locais que ja estejam em execucao
-    for (int j = 1; j <= 50; j++) {
-      if (j == idEscolhido) continue;
-      int pCluster = 9000 + j;
+    if (isPortaEmUso("127.0.0.1", minhaPortaCluster)) {
+      throw new IllegalStateException(String.format(
+          "Ja existe uma instancia ativa para Shard S%d | Replica %d (porta Cluster %d em uso em 127.0.0.1).",
+          idShard, idReplica, minhaPortaCluster));
+    }
+
+    int qtdSlots = Math.max(totalReplicas, idReplica + 1);
+    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>();
+    for (int r = 0; r < qtdSlots; r++) {
+      int idInterno = r + 1;
+      mapa.put(idInterno, new NoInfo(
+          idInterno,
+          idShard,
+          r,
+          "127.0.0.1",
+          PortasShard.cluster(idShard, r),
+          PortasShard.tcp(idShard, r),
+          PortasShard.udp(idShard, r),
+          Protocolo.PORTA_DISCOVERY));
+    }
+
+    // Descobre eventuais replicas adicionais (r >= qtdSlots) APENAS do MESMO shard em localhost
+    for (int r = qtdSlots; r < 10; r++) {
+      int pCluster = PortasShard.cluster(idShard, r);
       if (isPortaEmUso("127.0.0.1", pCluster)) {
-        int pTcp = 6789 + 10 * (j - 1);
-        int pUdp = 7777 + 10 * (j - 1);
-        mapa.put(j, new NoInfo(j, "127.0.0.1", pCluster, pTcp, pUdp, Protocolo.PORTA_DISCOVERY));
+        int idInterno = r + 1;
+        mapa.put(idInterno, new NoInfo(
+            idInterno,
+            idShard,
+            r,
+            "127.0.0.1",
+            pCluster,
+            PortasShard.tcp(idShard, r),
+            PortasShard.udp(idShard, r),
+            Protocolo.PORTA_DISCOVERY));
       }
     }
 
-    ClusterLog.info("CONFIG:LOCAL", String.format("No %d atribuido | Portas: Cluster=%d, TCP=%d, UDP=%d",
-        idEscolhido, minhaPortaCluster, minhaPortaTcp, minhaPortaUdp));
-    if (mapa.size() > 1) {
-      StringBuilder sb = new StringBuilder("Nos locais detectados: ");
-      for (Integer id : mapa.keySet()) {
-        if (id != idEscolhido) sb.append("No ").append(id).append(" ");
-      }
-      ClusterLog.info("CONFIG:LOCAL", sb.toString().trim());
-    } else {
-      ClusterLog.info("CONFIG:LOCAL", "Nenhum outro no local ativo. Este no sera o pioneiro do cluster.");
-    }
+    ClusterLog.info("CONFIG", String.format(
+        "Iniciando Shard: S%d | Replica: %d | Portas: TCP=%d, UDP=%d, Cluster=%d",
+        idShard, idReplica, minhaPortaTcp, minhaPortaUdp, minhaPortaCluster));
 
-    return new ConfigCluster(idEscolhido, mapa);
+    return new ConfigCluster(idReplica + 1, idShard, idReplica, mapa);
   }
 
   /**
-   * Atribui automaticamente o ID e descobre os pares via broadcast UDP na rede local (LAN).
-   * 
-   * @param idForcado ID opcional forcado por linha de comando (se null, detecta automaticamente).
-   * @return Objeto ConfigCluster pronto para uso em rede.
+   * Configura um no em modo REDE (LAN) para (idShard, idReplica), mantendo a mesma matematica de portas
+   * e sondando via broadcast UDP apenas pares que pertencam ao mesmo idShard.
    */
-  public static ConfigCluster descobrirEConfigurarRede(Integer idForcado) {
+  public static ConfigCluster configurarRedeShard(int idShard, int idReplica) {
+    Particionador.validarShard(idShard);
+    if (idReplica < 0 || idReplica >= PortasShard.MAX_REPLICAS) {
+      throw new IllegalArgumentException(
+          "ID_REPLICA invalido: " + idReplica + " (esperado 0.." + (PortasShard.MAX_REPLICAS - 1) + ")");
+    }
+
     String meuIp = BeaconClusterLAN.obterIpLocalLAN();
-    int portaClusterPadrao = 9000;
-    int portaTcpPadrao = Protocolo.PORTA_SERVIDOR_TCP;
-    int portaUdpPadrao = Protocolo.PORTA_SERVIDOR_UDP;
+    int minhaPortaTcp = PortasShard.tcp(idShard, idReplica);
+    int minhaPortaUdp = PortasShard.udp(idShard, idReplica);
+    int minhaPortaCluster = PortasShard.cluster(idShard, idReplica);
 
-    ClusterLog.info("CONFIG:REDE", "Sondando presenca de cluster existente na rede local via broadcast...");
-    Map<Integer, NoInfo> paresRede = BeaconClusterLAN.sondarParesNaRede(meuIp, portaClusterPadrao, portaTcpPadrao, portaUdpPadrao);
-
-    int idEscolhido = -1;
-    if (idForcado != null && idForcado > 0) {
-      idEscolhido = idForcado;
-      ClusterLog.info("CONFIG:REDE", "Utilizando ID forcado por parametro: No " + idEscolhido);
-    } else {
-      // 1. Tenta reutilizar o ID previamente atribuido a esta maquina
-      Integer idCache = carregarIdCacheado("lan");
-      if (idCache != null && idCache > 0 && !paresRede.containsKey(idCache)) {
-        idEscolhido = idCache;
-        ClusterLog.info("CONFIG:REDE", "Reassumindo identidade anterior desta maquina: No " + idEscolhido);
-      } else {
-        // 2. Preenchimento de lacunas (Gap Recycling): menor inteiro positivo livre >= 1
-        int candidato = 1;
-        while (paresRede.containsKey(candidato)) {
-          candidato++;
-        }
-        idEscolhido = candidato;
-        ClusterLog.info("CONFIG:REDE", "Alocando menor ID livre no cluster: No " + idEscolhido);
-      }
-    }
-    salvarIdCacheado("lan", idEscolhido);
-
-    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>(paresRede);
-    NoInfo meuInfo = new NoInfo(idEscolhido, meuIp, portaClusterPadrao, portaTcpPadrao, portaUdpPadrao, Protocolo.PORTA_DISCOVERY);
-    mapa.put(idEscolhido, meuInfo);
-
-    ClusterLog.info("CONFIG:REDE", String.format("No %d pronto (%s) | Pares encontrados na LAN: %d",
-        idEscolhido, meuIp, paresRede.size()));
-
-    return new ConfigCluster(idEscolhido, mapa);
-  }
-
-  /**
-   * Metodo legado para compatibilidade com testes que informam (id, totalNos).
-   */
-  public static ConfigCluster gerarConfigLocal(int meuId, int totalNos) {
-    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>();
-    for (int k = 1; k <= totalNos; k++) {
-      int portaCluster = 9000 + k;
-      int portaTcp = 6789 + 10 * (k - 1);
-      int portaUdp = 7777 + 10 * (k - 1);
-      int portaDisc = Protocolo.PORTA_DISCOVERY;
-      mapa.put(k, new NoInfo(k, "127.0.0.1", portaCluster, portaTcp, portaUdp, portaDisc));
-    }
-    return new ConfigCluster(meuId, mapa);
-  }
-
-  /**
-   * Carrega configuracao a partir de um arquivo .properties para casos especificos.
-   */
-  public static ConfigCluster carregarArquivo(String caminho, int meuId) throws Exception {
-    File f = new File(caminho);
-    if (!f.exists()) {
-      throw new IllegalArgumentException("Arquivo de configuracao do cluster nao encontrado: " + caminho);
+    if (isPortaEmUso(meuIp, minhaPortaCluster)) {
+      throw new IllegalStateException(String.format(
+          "Ja existe uma instancia ativa para Shard S%d | Replica %d em %s:%d.",
+          idShard, idReplica, meuIp, minhaPortaCluster));
     }
 
-    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>();
+    ClusterLog.info("CONFIG", String.format(
+        "Iniciando Shard: S%d | Replica: %d | Portas: TCP=%d, UDP=%d, Cluster=%d (Host LAN: %s)",
+        idShard, idReplica, minhaPortaTcp, minhaPortaUdp, minhaPortaCluster, meuIp));
 
-    try (BufferedReader br = new BufferedReader(new InputStreamReader(new FileInputStream(f), "UTF-8"))) {
-      String linha;
-      while ((linha = br.readLine()) != null) {
-        linha = linha.trim();
-        if (linha.isEmpty() || linha.startsWith("#")) {
-          continue;
-        }
+    Map<Integer, NoInfo> paresShard = BeaconClusterLAN.sondarParesNaRede(
+        idShard, idReplica, meuIp, minhaPortaCluster, minhaPortaTcp, minhaPortaUdp);
 
-        String[] partesIgual = linha.split("=", 2);
-        if (partesIgual.length < 2) continue;
+    int meuId = idReplica + 1;
+    Map<Integer, NoInfo> mapa = new ConcurrentHashMap<>(paresShard);
+    mapa.put(meuId, new NoInfo(
+        meuId, idShard, idReplica, meuIp, minhaPortaCluster, minhaPortaTcp, minhaPortaUdp, Protocolo.PORTA_DISCOVERY));
 
-        String chave = partesIgual[0].trim();
-        if (!chave.startsWith("no.")) continue;
+    ClusterLog.info("CONFIG", String.format(
+        "Sondagem LAN concluida para Shard S%d: %d par(es) do mesmo shard encontrado(s).",
+        idShard, paresShard.size()));
 
-        int id = Integer.parseInt(chave.substring(3).trim());
-        String resto = partesIgual[1].trim();
-
-        String[] tokens = resto.split(";");
-        String host = tokens[0].trim();
-        int portaCluster = 9000 + id;
-        int portaTcp = Protocolo.PORTA_SERVIDOR_TCP;
-        int portaUdp = Protocolo.PORTA_SERVIDOR_UDP;
-        int portaDisc = Protocolo.PORTA_DISCOVERY;
-
-        for (int i = 1; i < tokens.length; i++) {
-          String tok = tokens[i].trim();
-          if (tok.startsWith("cluster=")) {
-            portaCluster = Integer.parseInt(tok.substring(8).trim());
-          } else if (tok.startsWith("tcp=")) {
-            portaTcp = Integer.parseInt(tok.substring(4).trim());
-          } else if (tok.startsWith("udp=")) {
-            portaUdp = Integer.parseInt(tok.substring(4).trim());
-          } else if (tok.startsWith("discovery=")) {
-            portaDisc = Integer.parseInt(tok.substring(10).trim());
-          }
-        }
-
-        mapa.put(id, new NoInfo(id, host, portaCluster, portaTcp, portaUdp, portaDisc));
-      }
-    }
-
-    if (!mapa.containsKey(meuId)) {
-      throw new IllegalArgumentException("O ID informado (" + meuId + ") nao consta no arquivo de configuracao.");
-    }
-
-    return new ConfigCluster(meuId, mapa);
+    return new ConfigCluster(meuId, idShard, idReplica, mapa);
   }
 }

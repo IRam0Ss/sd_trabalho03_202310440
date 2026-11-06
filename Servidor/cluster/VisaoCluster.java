@@ -66,21 +66,30 @@ public class VisaoCluster implements Serializable {
   }
 
   private final int meuId;
+  private final int idShard;
   private final Map<Integer, ParEstado> pares = new HashMap<>();
 
   public VisaoCluster(ConfigCluster config) {
     this.meuId = config.getMeuId();
+    this.idShard = config.getIdShard();
     for (ConfigCluster.NoInfo info : config.getNos().values()) {
-      if (info.id != meuId) {
+      if (info.id != meuId && info.idShard == idShard) {
         pares.put(info.id, new ParEstado(info));
       }
     }
   }
 
   public synchronized void adicionarParSeAusente(ConfigCluster.NoInfo info) {
-    if (info != null && info.id != meuId && !pares.containsKey(info.id)) {
+    if (info == null || info.id == meuId) {
+      return;
+    }
+    if (info.idShard != idShard) {
+      ClusterLog.aviso("ISOLAMENTO", "VisaoCluster recusou par de outro shard (S" + info.idShard + " != S" + idShard + ").");
+      return;
+    }
+    if (!pares.containsKey(info.id)) {
       pares.put(info.id, new ParEstado(info));
-      System.out.println("[VISAO] No " + info.id + " adicionado a tabela de saude do cluster.");
+      System.out.println("[VISAO] Replica " + info.idReplica + " (No " + info.id + ") adicionada a tabela de saude do Shard S" + idShard + ".");
     }
   }
 

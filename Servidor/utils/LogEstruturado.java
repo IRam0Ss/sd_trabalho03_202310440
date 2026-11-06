@@ -88,7 +88,8 @@ public final class LogEstruturado {
         || u.contains("INDISPONIVEL") || u.contains("EXCEPTION")) {
       return VERMELHO;
     }
-    if (u.contains("[LIDER ATIVO]") || u.contains("ASSUMIU") || u.contains("ROTEAD") || u.contains("VOTOS OBTIDOS")) {
+    if (u.contains("[LIDER ATIVO]") || u.contains("ASSUMIU") || u.contains("ROTEAD") || u.contains("ROTEANDO")
+        || u.contains("VOTOS OBTIDOS")) {
       return VERDE;
     }
     if (u.contains("[SPLIT-BRAIN]") || u.contains("[ISOLAMENTO]")) {

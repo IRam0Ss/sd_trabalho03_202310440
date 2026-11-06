@@ -105,9 +105,16 @@ public class Operacao implements Serializable {
   }
 
   public static Operacao registrarMsgGrupo(String idMensagem, String autor, String nomeGrupo, Set<String> esperados, boolean vu) {
+    return registrarMsgGrupo(idMensagem, autor, null, 0, nomeGrupo, esperados, vu);
+  }
+
+  public static Operacao registrarMsgGrupo(String idMensagem, String autor, String ipAutor, int portaAutor,
+      String nomeGrupo, Set<String> esperados, boolean vu) {
     Operacao op = new Operacao(TipoOperacao.REGISTRAR_MSG_GRUPO, idMensagem);
     op.idMensagem = idMensagem;
     op.nomeUsuario = autor;
+    op.ip = ipAutor;
+    op.porta = portaAutor;
     op.nomeGrupo = nomeGrupo;
     op.esperados = (esperados != null) ? new HashSet<>(esperados) : new HashSet<>();
     op.visualizacaoUnica = vu;
@@ -115,9 +122,15 @@ public class Operacao implements Serializable {
   }
 
   public static Operacao registrarMsgPrivada(String idMensagem, String autor, String destinatario) {
+    return registrarMsgPrivada(idMensagem, autor, null, 0, destinatario);
+  }
+
+  public static Operacao registrarMsgPrivada(String idMensagem, String autor, String ipAutor, int portaAutor, String destinatario) {
     Operacao op = new Operacao(TipoOperacao.REGISTRAR_MSG_PRIVADA, idMensagem);
     op.idMensagem = idMensagem;
     op.nomeUsuario = autor;
+    op.ip = ipAutor;
+    op.porta = portaAutor;
     op.destinatario = destinatario;
     return op;
   }

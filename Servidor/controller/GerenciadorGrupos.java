@@ -25,6 +25,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.zip.CRC32;
 
+import cluster.Particionador;
 import utils.InfoUser;
 
 /**
@@ -40,9 +41,13 @@ public class GerenciadorGrupos implements Serializable {
 
   private static final long serialVersionUID = 3L;
 
-  // Estado central do servidor
+  // Estado central da particao (Shard) deste servidor
+  private final int idShard;
   private final Map<String, InfoUser> usuarios;
+  /** Endpoints (IP/UDP) de membros de grupos desta particao (inclui membros cujos cadastros pertencem a outros shards). */
+  private final Map<String, InfoUser> endpointsMembros;
   private final Map<String, LinkedHashSet<String>> grupos;
+  /** Tabela de bloqueios replicada globalmente em todos os shards para verificacao O(1) em SEND. */
   private final Map<String, Set<String>> bloqueios;
   private final Map<String, RegistroMensagem> mensagens;
   private final LinkedHashMap<String, Resultado> requisicoesProcessadas;
@@ -51,10 +56,19 @@ public class GerenciadorGrupos implements Serializable {
   private static final int MAX_CACHE_REQUISICOES = 2000;
 
   /**
-   * Construtor padrao. Inicializa todas as estruturas de dados em memoria.
+   * Construtor padrao (modo monolitico/legado sem filtro de shard: idShard = -1).
    */
   public GerenciadorGrupos() {
+    this(-1);
+  }
+
+  /**
+   * Construtor particionado (T#03): armazena apenas usuarios e grupos pertencentes a {@code idShard}.
+   */
+  public GerenciadorGrupos(int idShard) {
+    this.idShard = idShard;
     this.usuarios = new HashMap<>();
+    this.endpointsMembros = new HashMap<>();
     this.grupos = new HashMap<>();
     this.bloqueios = new HashMap<>();
     this.mensagens = new HashMap<>();
@@ -65,6 +79,10 @@ public class GerenciadorGrupos implements Serializable {
       }
     };
     this.versao = 0;
+  }
+
+  public int getIdShard() {
+    return idShard;
   }
 
   private volatile boolean ativo = true;
@@ -92,24 +110,33 @@ public class GerenciadorGrupos implements Serializable {
   }
 
   /**
-   * Remove com seguranca um cliente que perdeu a conexao TCP, garantindo que
-   * clientes que ja reconectaram com outra sessao nao sejam derrubados por engano.
+   * Valida e encerra a sessao TCP local de um cliente que caiu bruscamente, retornando true
+   * apenas se este no ainda estiver ATIVO e a sessao nao tiver sido renovada por reconexao.
    */
-  public synchronized Resultado desconectarClienteInativo(String nomeUsuario, Object sessao) {
-    if (!ativo) {
-      return Resultado.ok("Servidor nao ativo");
-    }
-    if (nomeUsuario == null || sessao == null) {
-      return Resultado.ok("Nenhum usuario");
+  public synchronized boolean encerrarSessaoLocalSeAtiva(String nomeUsuario, Object sessao) {
+    if (!ativo || nomeUsuario == null || sessao == null) {
+      return false;
     }
     String norm = normalizar(nomeUsuario);
     Object sessaoAtual = sessoesAtivas.get(norm);
     if (sessaoAtual != null && sessaoAtual != sessao) {
-      System.out.println("[GERENCIADOR] [INFO] Desconexao ignorada para '" + nomeUsuario + "' pois usuario ja possui nova sessao ativa.");
-      return Resultado.ok("Sessao ja renovada");
+      System.out.println("[GERENCIADOR] [INFO] Desconexao ignorada para '" + nomeUsuario
+          + "' pois usuario ja possui nova sessao ativa.");
+      return false;
     }
     sessoesAtivas.remove(norm);
+    return true;
+  }
 
+  /**
+   * Remove com seguranca um cliente que perdeu a conexao TCP, garantindo que
+   * clientes que ja reconectaram com outra sessao nao sejam derrubados por engano.
+   */
+  public synchronized Resultado desconectarClienteInativo(String nomeUsuario, Object sessao) {
+    if (!encerrarSessaoLocalSeAtiva(nomeUsuario, sessao)) {
+      return Resultado.ok("Sessao ignorada ou ja renovada");
+    }
+    String norm = normalizar(nomeUsuario);
     Operacao op = Operacao.removerUsuario("auto-disconnect-" + System.currentTimeMillis() + "-" + norm, nomeUsuario);
     return aplicar(op);
   }
@@ -162,6 +189,31 @@ public class GerenciadorGrupos implements Serializable {
       if (emCache != null) {
         System.out.println("[GERENCIADOR] [INFO] Requisicao idempotente repetida detectada: " + op.getIdRequisicao());
         return emCache;
+      }
+    }
+
+    // Validacao de propriedade de particao (defesa em profundidade antes de alterar versao)
+    if (idShard >= 0) {
+      switch (op.getTipo()) {
+        case REGISTRAR_USUARIO:
+          if (!Particionador.pertence(op.getNomeUsuario(), idShard)) {
+            return Resultado.erro("Chave de usuario '" + op.getNomeUsuario() + "' fora da particao S" + idShard);
+          }
+          break;
+        case ENTRAR_GRUPO:
+        case SAIR_GRUPO:
+        case REGISTRAR_MSG_GRUPO:
+          if (!Particionador.pertence(op.getNomeGrupo(), idShard)) {
+            return Resultado.erro("Chave de grupo '" + op.getNomeGrupo() + "' fora da particao S" + idShard);
+          }
+          break;
+        case REGISTRAR_MSG_PRIVADA:
+          if (!Particionador.pertence(op.getDestinatario(), idShard)) {
+            return Resultado.erro("Mensagem privada para '" + op.getDestinatario() + "' fora da particao S" + idShard);
+          }
+          break;
+        default:
+          break;
       }
     }
 
@@ -244,6 +296,13 @@ public class GerenciadorGrupos implements Serializable {
     String norm = normalizar(nome);
     InfoUser existente = usuarios.get(norm);
 
+    // Atualiza endpoint de grupo caso o usuario ja participe de alguma sala neste shard
+    InfoUser epMembro = endpointsMembros.get(norm);
+    if (epMembro != null) {
+      if (op.getIp() != null && !op.getIp().isEmpty()) epMembro.setIp(op.getIp());
+      if (op.getPorta() > 0) epMembro.setPorta(op.getPorta());
+    }
+
     if (existente != null) {
       existente.setIp(op.getIp());
       existente.setPorta(op.getPorta());
@@ -253,7 +312,7 @@ public class GerenciadorGrupos implements Serializable {
     } else {
       InfoUser novo = new InfoUser(nome.trim(), op.getIp(), op.getPorta());
       usuarios.put(norm, novo);
-      System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' registrado com sucesso. Total ativos: "
+      System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' registrado nesta particao. Total usuarios locais: "
           + usuarios.size() + " | Versao: " + versao);
       return Resultado.ok("registrado com sucesso", true);
     }
@@ -266,6 +325,7 @@ public class GerenciadorGrupos implements Serializable {
     }
     String norm = normalizar(nome);
     InfoUser removido = usuarios.remove(norm);
+    endpointsMembros.remove(norm);
 
     boolean membroRemovidoDeAlgumGrupo = false;
     List<String> gruposParaRemover = new ArrayList<>();
@@ -286,7 +346,10 @@ public class GerenciadorGrupos implements Serializable {
     }
 
     boolean notificar = (removido != null) || membroRemovidoDeAlgumGrupo || !gruposParaRemover.isEmpty();
-    System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' desconectado do servidor. Notificar clientes: " + notificar + " | Versao: " + versao);
+    if (notificar) {
+      System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' limpo desta particao. Notificar clientes: "
+          + notificar + " | Versao: " + versao);
+    }
     return Resultado.ok("Desconectado com sucesso", notificar);
   }
 
@@ -300,18 +363,29 @@ public class GerenciadorGrupos implements Serializable {
     String norm = normalizar(nome);
     boolean usuarioNovo = false;
 
-    // Auto-registro atomico caso o usuario ainda nao conste na tabela global
-    if (!usuarios.containsKey(norm)) {
-      usuarios.put(norm, new InfoUser(nome.trim(), op.getIp(), op.getPorta()));
-      usuarioNovo = true;
-      System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' auto-registrado via JOIN.");
+    // Guarda sempre a copia do endpoint no shard do grupo para entrega UDP sem hop extra
+    InfoUser epExistente = endpointsMembros.get(norm);
+    if (epExistente == null) {
+      endpointsMembros.put(norm, new InfoUser(nome.trim(), op.getIp(), op.getPorta()));
     } else {
-      InfoUser u = usuarios.get(norm);
-      if (op.getIp() != null && !op.getIp().isEmpty()) {
-        u.setIp(op.getIp());
-      }
-      if (op.getPorta() > 0) {
-        u.setPorta(op.getPorta());
+      if (op.getIp() != null && !op.getIp().isEmpty()) epExistente.setIp(op.getIp());
+      if (op.getPorta() > 0) epExistente.setPorta(op.getPorta());
+    }
+
+    // Registra na tabela de usuarios APENAS se este shard tambem for dono da chave do usuario
+    if (idShard < 0 || Particionador.pertence(nome, idShard)) {
+      if (!usuarios.containsKey(norm)) {
+        usuarios.put(norm, new InfoUser(nome.trim(), op.getIp(), op.getPorta()));
+        usuarioNovo = true;
+        System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' auto-registrado via JOIN nesta particao.");
+      } else {
+        InfoUser u = usuarios.get(norm);
+        if (op.getIp() != null && !op.getIp().isEmpty()) {
+          u.setIp(op.getIp());
+        }
+        if (op.getPorta() > 0) {
+          u.setPorta(op.getPorta());
+        }
       }
     }
 
@@ -345,6 +419,18 @@ public class GerenciadorGrupos implements Serializable {
       grupos.remove(nomeGrupo);
       System.out.println("[GERENCIADOR] [INFO] Grupo '" + nomeGrupo + "' deletado da memoria pois ficou vazio.");
     }
+
+    // Remove endpoint cacheado se o membro nao participar de mais nenhum grupo neste shard
+    boolean aindaEmGrupo = false;
+    for (LinkedHashSet<String> set : grupos.values()) {
+      if (set.contains(norm)) {
+        aindaEmGrupo = true;
+        break;
+      }
+    }
+    if (!aindaEmGrupo) {
+      endpointsMembros.remove(norm);
+    }
     return Resultado.ok("Saiu do grupo " + nomeGrupo, false);
   }
 
@@ -362,8 +448,12 @@ public class GerenciadorGrupos implements Serializable {
   private Resultado aplicarDesbloquear(Operacao op) {
     String bloqueador = normalizar(op.getNomeUsuario());
     String bloqueado = normalizar(op.getDestinatario());
-    if (bloqueios.containsKey(bloqueador)) {
-      bloqueios.get(bloqueador).remove(bloqueado);
+    Set<String> alvos = bloqueios.get(bloqueador);
+    if (alvos != null) {
+      alvos.remove(bloqueado);
+      if (alvos.isEmpty()) {
+        bloqueios.remove(bloqueador);
+      }
       System.out.println("[GERENCIADOR] [INFO] Desbloqueio: '" + op.getNomeUsuario() + "' -> '" + op.getDestinatario() + "'");
     }
     return Resultado.ok("Usuario " + op.getDestinatario() + " desbloqueado com sucesso");
@@ -380,6 +470,15 @@ public class GerenciadorGrupos implements Serializable {
         u.setPorta(op.getPorta());
       }
     }
+    InfoUser ep = endpointsMembros.get(norm);
+    if (ep != null) {
+      if (op.getIp() != null && !op.getIp().isEmpty()) {
+        ep.setIp(op.getIp());
+      }
+      if (op.getPorta() > 0) {
+        ep.setPorta(op.getPorta());
+      }
+    }
     return Resultado.ok("ok");
   }
 
@@ -393,7 +492,8 @@ public class GerenciadorGrupos implements Serializable {
       return new Resultado(true, "OK", "duplicada", false, false, 0, true);
     }
 
-    RegistroMensagem reg = new RegistroMensagem(idTrim, op.getNomeGrupo(), op.getNomeUsuario(), op.getEsperados(), op.getTimestamp());
+    RegistroMensagem reg = new RegistroMensagem(
+        idTrim, op.getNomeGrupo(), op.getNomeUsuario(), op.getIp(), op.getPorta(), op.getEsperados(), op.getTimestamp());
     mensagens.put(idTrim, reg);
     return Resultado.ok("registrado");
   }
@@ -408,7 +508,8 @@ public class GerenciadorGrupos implements Serializable {
       return new Resultado(true, "OK", "duplicada", false, false, 0, true);
     }
 
-    RegistroMensagem reg = new RegistroMensagem(idTrim, op.getDestinatario(), op.getNomeUsuario(), op.getTimestamp());
+    RegistroMensagem reg = new RegistroMensagem(
+        idTrim, op.getDestinatario(), op.getNomeUsuario(), op.getIp(), op.getPorta(), op.getTimestamp());
     mensagens.put(idTrim, reg);
     return Resultado.ok("registrado");
   }
@@ -460,8 +561,13 @@ public class GerenciadorGrupos implements Serializable {
     List<InfoUser> lista = new ArrayList<>();
     for (String nomeNorm : grupos.get(nomeGrupo)) {
       InfoUser u = usuarios.get(nomeNorm);
+      if (u == null) {
+        u = endpointsMembros.get(nomeNorm);
+      }
       if (u != null) {
         lista.add(u);
+      } else {
+        lista.add(new InfoUser(nomeNorm, "127.0.0.1", 0));
       }
     }
     return lista;
@@ -491,6 +597,9 @@ public class GerenciadorGrupos implements Serializable {
     for (String m : membros) {
       if (!m.equals(normRemetente)) {
         InfoUser u = usuarios.get(m);
+        if (u == null) {
+          u = endpointsMembros.get(m);
+        }
         if (u != null) {
           destinatarios.add(u);
         }
@@ -522,6 +631,26 @@ public class GerenciadorGrupos implements Serializable {
       busca = busca.substring(1).trim();
     }
     return usuarios.get(normalizar(busca));
+  }
+
+  /**
+   * Busca o endpoint (IP/Porta UDP) conhecido nesta particao, consultando primeiro os usuarios
+   * cadastrados neste shard e, em seguida, os endpoints de membros cross-shard registrados no JOIN.
+   */
+  public synchronized InfoUser buscarEndpointConhecido(String nome) {
+    if (nome == null) {
+      return null;
+    }
+    String busca = nome.trim();
+    if (busca.startsWith("@")) {
+      busca = busca.substring(1).trim();
+    }
+    String norm = normalizar(busca);
+    InfoUser u = usuarios.get(norm);
+    if (u != null) {
+      return u;
+    }
+    return endpointsMembros.get(norm);
   }
 
   public synchronized boolean isBloqueadoMutuo(String u1, String u2) {
@@ -606,6 +735,7 @@ public class GerenciadorGrupos implements Serializable {
       ObjectOutputStream oos = new ObjectOutputStream(baos);
       oos.writeLong(this.versao);
       oos.writeObject(new HashMap<>(this.usuarios));
+      oos.writeObject(new HashMap<>(this.endpointsMembros));
       oos.writeObject(new HashMap<>(this.grupos));
       oos.writeObject(new HashMap<>(this.bloqueios));
       oos.writeObject(new HashMap<>(this.mensagens));
@@ -630,12 +760,16 @@ public class GerenciadorGrupos implements Serializable {
 
     long versaoSnap = ois.readLong();
     Map<String, InfoUser> snapUsuarios = (Map<String, InfoUser>) ois.readObject();
+    Map<String, InfoUser> snapEndpoints = (Map<String, InfoUser>) ois.readObject();
     Map<String, LinkedHashSet<String>> snapGrupos = (Map<String, LinkedHashSet<String>>) ois.readObject();
     Map<String, Set<String>> snapBloqueios = (Map<String, Set<String>>) ois.readObject();
     Map<String, RegistroMensagem> snapMensagens = (Map<String, RegistroMensagem>) ois.readObject();
 
     this.usuarios.clear();
     this.usuarios.putAll(snapUsuarios);
+
+    this.endpointsMembros.clear();
+    this.endpointsMembros.putAll(snapEndpoints);
 
     this.grupos.clear();
     this.grupos.putAll(snapGrupos);
@@ -701,21 +835,22 @@ public class GerenciadorGrupos implements Serializable {
    * Imprime no console a estrutura de dados completa, versao e hash CRC32.
    */
   public synchronized void imprimirEstado() {
-    System.out.println("\n=== ESTRUTURA DE DADOS REPLICADA (GerenciadorGrupos) ===");
+    String rotuloShard = (idShard >= 0) ? Particionador.nome(idShard) : "GLOBAL/MONOLITICO";
+    System.out.println("\n=== ESTRUTURA DE DADOS DA PARTICAO (" + rotuloShard + ") ===");
     System.out.printf("Versao: %d | Hash CRC32: 0x%08X\n", versao, calcularHash());
-    System.out.println("Usuarios Online (" + usuarios.size() + "):");
+    System.out.println("Usuarios Desta Particao (" + usuarios.size() + "):");
     for (InfoUser u : usuarios.values()) {
       System.out.println("  - " + u.getNome() + " (" + u.getIp() + ":" + u.getPorta() + ")");
     }
-    System.out.println("Grupos Ativos (" + grupos.size() + "):");
+    System.out.println("Grupos Desta Particao (" + grupos.size() + "):");
     for (Map.Entry<String, LinkedHashSet<String>> e : grupos.entrySet()) {
       System.out.println("  - " + e.getKey() + " -> membros: " + e.getValue());
     }
-    System.out.println("Bloqueios Ativos (" + bloqueios.size() + "):");
+    System.out.println("Bloqueios Replicados Globalmente (" + bloqueios.size() + "):");
     for (Map.Entry<String, Set<String>> e : bloqueios.entrySet()) {
       System.out.println("  - " + e.getKey() + " bloqueou: " + e.getValue());
     }
-    System.out.println("Mensagens Rastreadas em Memoria: " + mensagens.size());
+    System.out.println("Mensagens Rastreadas Nesta Particao: " + mensagens.size());
     System.out.println("========================================================\n");
   }
 

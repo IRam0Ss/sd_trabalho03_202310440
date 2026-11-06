@@ -105,34 +105,38 @@ public class ClusterLog {
       Map<Integer, ConfigCluster.NoInfo> nos, Collection<VisaoCluster.ParEstado> pares,
       controller.GerenciadorGrupos gerenciador) {
 
+    ConfigCluster.NoInfo meuInfo = nos.get(meuId);
+    int shardId = (meuInfo != null) ? meuInfo.idShard : 0;
+    int replicaId = (meuInfo != null) ? meuInfo.idReplica : (meuId - 1);
+
     System.out.println();
     System.out.println("==========================================================================================");
-    System.out.println("                         STATUS DO CLUSTER DISTRIBUIDO E.D.E.N.                          ");
+    System.out.printf("         STATUS DO SHARD %s | CLUSTER DISTRIBUIDO E.D.E.N. (T#03)\n", Particionador.nome(shardId));
     System.out.println("==========================================================================================");
-    System.out.printf(" No Local: No %d %s | Papel: %s | Epoca: %d | Versao de Dados: %d\n",
-        meuId, (meuId == idLider ? "[LIDER ATIVO]" : "[STANDBY]"), meuPapel, epoca, gerenciador.getVersao());
-    System.out.printf(" Lider Conhecido: No %s | Total de Membros: %d\n",
-        (idLider > 0 ? String.valueOf(idLider) : "NENHUM"), nos.size());
+    System.out.printf(" No Local: Shard S%d | Replica %d (No %d) %s | Papel: %s | Epoca: %d | Versao: %d\n",
+        shardId, replicaId, meuId, (meuId == idLider ? "[LIDER ATIVO]" : "[STANDBY]"),
+        meuPapel, epoca, gerenciador.getVersao());
+    System.out.printf(" Lider do Shard S%d: %s | Replicas neste Shard: %d\n",
+        shardId, (idLider > 0 ? ("Replica " + (idLider - 1) + " (No " + idLider + ")") : "NENHUM"), nos.size());
     System.out.println("------------------------------------------------------------------------------------------");
-    System.out.printf("| %-4s | %-20s | %-9s | %-6s | %-7s | %-8s | %-12s |\n",
-        "ID", "ENDERECO", "PAPEL", "EPOCA", "VERSAO", "SAUDE", "ULTIMO HB");
+    System.out.printf("| %-6s | %-20s | %-9s | %-6s | %-7s | %-8s | %-12s |\n",
+        "REP/ID", "ENDERECO CLUSTER", "PAPEL", "EPOCA", "VERSAO", "SAUDE", "ULTIMO HB");
     System.out.println("------------------------------------------------------------------------------------------");
 
     // Imprime no local
-    ConfigCluster.NoInfo meuInfo = nos.get(meuId);
     String hostLocal = (meuInfo != null) ? (meuInfo.host + ":" + meuInfo.portaCluster) : "local";
-    System.out.printf("| %-4s | %-20s | %-9s | %-6d | %-7d | %-8s | %-12s |\n",
-        (meuId + "*"), hostLocal, meuPapel, epoca, gerenciador.getVersao(), "LOCAL", "agora");
+    System.out.printf("| %-6s | %-20s | %-9s | %-6d | %-7d | %-8s | %-12s |\n",
+        ("R" + replicaId + "/" + meuId + "*"), hostLocal, meuPapel, epoca, gerenciador.getVersao(), "LOCAL", "agora");
 
-    // Imprime pares conhecidos
+    // Imprime pares conhecidos (apenas do mesmo shard)
     for (VisaoCluster.ParEstado p : pares) {
       if (p.id == meuId) continue;
       long deltaHb = (p.ultimoHeartbeat > 0) ? (System.currentTimeMillis() - p.ultimoHeartbeat) : -1;
       String hbStr = (deltaHb >= 0) ? (deltaHb + "ms atras") : "nunca";
       String saude = p.isVivo() ? "ONLINE" : "DOWN";
-      String idDisplay = (p.id == idLider) ? (p.id + " (L)") : String.valueOf(p.id);
+      String idDisplay = "R" + (p.id - 1) + "/" + p.id + (p.id == idLider ? "L" : "");
 
-      System.out.printf("| %-4s | %-20s | %-9s | %-6d | %-7d | %-8s | %-12s |\n",
+      System.out.printf("| %-6s | %-20s | %-9s | %-6d | %-7d | %-8s | %-12s |\n",
           idDisplay, (p.host + ":" + p.portaCluster), p.estado, p.epoca, p.versao, saude, hbStr);
     }
 

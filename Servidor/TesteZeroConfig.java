@@ -3,13 +3,13 @@ import java.util.*;
 
 public class TesteZeroConfig {
   public static void main(String[] args) throws Exception {
-    System.out.println("=== TESTANDO AUTO-DISCOVERY E PARTIONAMENTO (ID % 3) ===");
+    System.out.println("=== TESTANDO AUTO-DISCOVERY E PARTIONAMENTO (S0 -> S1 -> S2 -> STANDBY) ===");
     List<Process> processos = new ArrayList<>();
 
     try {
       for (int i = 1; i <= 4; i++) {
-        System.out.println("\n[SPAWN] Subindo processo " + i + " com 'java Principal' (sem argumentos)...");
-        ProcessBuilder pb = new ProcessBuilder("java", "-cp", "Servidor/bin", "Principal");
+        System.out.println("\n[SPAWN] Subindo processo " + i + " com 'java Principal --local'...");
+        ProcessBuilder pb = new ProcessBuilder("java", "-cp", "Servidor/bin", "Principal", "--local");
         pb.redirectErrorStream(true);
         Process p = pb.start();
         processos.add(p);
@@ -24,10 +24,10 @@ public class TesteZeroConfig {
             break;
           }
         }
-        Thread.sleep(600);
+        Thread.sleep(800);
       }
 
-      System.out.println("\n\u2705 SUCESSO: Todos os processos subiram autonomamente com ID % 3 e portas 5000+ID!");
+      System.out.println("\n\u2705 SUCESSO: Todos os processos subiram na ordem crescente S0 -> S1 -> S2 -> Standby!");
 
     } finally {
       System.out.println("\n[CLEANUP] Encerrando processos...");

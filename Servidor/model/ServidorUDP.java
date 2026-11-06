@@ -237,13 +237,6 @@ public class ServidorUDP implements Runnable {
     int portaRemetente = apdu.getPortaClienteUDP() > 0 ? apdu.getPortaClienteUDP() : portaOrigemPacote;
     String ipRemetenteStr = ipRemetente.getHostAddress();
 
-    if (saltos == 0 && roteador != null && apdu.getNomeUsuario() != null) {
-      int shardRemetente = Particionador.shardDe(apdu.getNomeUsuario());
-      if (shardRemetente != roteador.getMeuShard()) {
-        roteador.validarCadastroRemetenteAssincrono(apdu.getNomeUsuario());
-      }
-    }
-
     int shardDestino = Particionador.shardDe(nomeGrupo);
     if (roteador != null && shardDestino != roteador.getMeuShard()) {
       System.out.println("[UDP] Roteando " + comando + " para grupo '" + nomeGrupo
@@ -257,21 +250,10 @@ public class ServidorUDP implements Runnable {
     System.out.println("[UDP] Processando " + comando + " para grupo '" + nomeGrupo
         + "' de '" + usuarioRemetente.getNome() + "' em " + Particionador.nome(shardDestino) + origemTag);
 
-    // Validacao contra Amnesia de Shard: se o usuario/grupo nao existe na memoria deste shard,
-    // notifica o no de entrada para fechar o socket TCP do cliente e forcar Failover + Re-REGISTER/Re-JOIN
+    // Valida se o remetente pertence ao grupo
     if (!gerenciador.isMembroGrupo(nomeGrupo, usuarioRemetente.getNome())) {
-      String motivo = "Usuario '" + usuarioRemetente.getNome() + "' ou grupo '" + nomeGrupo
-          + "' nao consta na memoria de " + Particionador.nome(shardDestino);
-      System.out.println("[UDP] [AMNESIA-SHARD] " + motivo
-          + ". Solicitando fechamento do socket TCP de entrada para reconexao do cliente!");
-      if (roteador != null) {
-        roteador.invalidarSessaoClienteGlobal(usuarioRemetente.getNome(), motivo);
-      } else {
-        Object sessao = gerenciador.obterSessaoAtiva(usuarioRemetente.getNome());
-        if (sessao instanceof controller.AtendimentoCliente) {
-          ((controller.AtendimentoCliente) sessao).forcarQuedaPorAmnesiaShard(motivo);
-        }
-      }
+      System.out.println("[UDP] [AVISO] Usuario '" + usuarioRemetente.getNome() + "' tentou enviar para grupo '" + nomeGrupo
+          + "' sem ser membro em " + Particionador.nome(shardDestino) + ". Mensagem ignorada.");
       return;
     }
 
@@ -369,13 +351,6 @@ public class ServidorUDP implements Runnable {
     int portaPvt = apdu.getPortaClienteUDP() > 0 ? apdu.getPortaClienteUDP() : portaOrigemPacote;
     String ipRemetenteStr = ipRemetente.getHostAddress();
 
-    if (saltos == 0 && roteador != null && apdu.getNomeUsuario() != null) {
-      int shardRemetente = Particionador.shardDe(apdu.getNomeUsuario());
-      if (shardRemetente != roteador.getMeuShard()) {
-        roteador.validarCadastroRemetenteAssincrono(apdu.getNomeUsuario());
-      }
-    }
-
     int shardDestino = Particionador.shardDe(nomeDestino);
     if (roteador != null && shardDestino != roteador.getMeuShard()) {
       System.out.println("[UDP] Roteando SENDPVT para destinatario '" + nomeDestino
@@ -388,24 +363,6 @@ public class ServidorUDP implements Runnable {
     String origemTag = (saltos > 0) ? " (recebido via roteamento inter-shard)" : "";
     System.out.println("[UDP] Processando SENDPVT de '" + remetentePvt.getNome()
         + "' para '" + nomeDestino + "' em " + Particionador.nome(shardDestino) + origemTag);
-
-    // Se este proprio shard tambem e o Home Shard do remetente e ele nao consta na memoria, aciona reconexao
-    if (gerenciador.getIdShard() >= 0 && Particionador.pertence(remetentePvt.getNome(), shardDestino)
-        && gerenciador.buscarUsuarioPorNome(remetentePvt.getNome()) == null) {
-      String motivoRem = "Remetente '" + remetentePvt.getNome() + "' desconhecido na memoria de "
-          + Particionador.nome(shardDestino);
-      System.out.println("[UDP] [AMNESIA-SHARD] " + motivoRem
-          + ". Solicitando fechamento do socket TCP de entrada para reconexao!");
-      if (roteador != null) {
-        roteador.invalidarSessaoClienteGlobal(remetentePvt.getNome(), motivoRem);
-      } else {
-        Object sessao = gerenciador.obterSessaoAtiva(remetentePvt.getNome());
-        if (sessao instanceof controller.AtendimentoCliente) {
-          ((controller.AtendimentoCliente) sessao).forcarQuedaPorAmnesiaShard(motivoRem);
-        }
-      }
-      return;
-    }
 
     InfoUser cadPvt = gerenciador.buscarEndpointConhecido(remetentePvt.getNome());
     if (cadPvt != null
@@ -477,11 +434,6 @@ public class ServidorUDP implements Runnable {
     } else {
       System.out.println("[UDP] [AVISO] Destinatario '" + nomeDestino + "' nao encontrado online em "
           + Particionador.nome(shardDestino) + ".");
-      // Caso o destinatario esteja preso em outro gateway apos reinicio deste shard, forca reconexao dele
-      if (roteador != null && nomeDestino != null && !nomeDestino.isEmpty()) {
-        roteador.invalidarSessaoClienteGlobal(nomeDestino,
-            "Destinatario '" + nomeDestino + "' ausente na memoria de " + Particionador.nome(shardDestino));
-      }
     }
   }
 

@@ -25,7 +25,7 @@ import utils.LogEstruturado;
  * Ponto de entrada do servidor E.D.E.N. (Trabalho 03 - Particionamento + Replicacao).
  * Filosofia Zero-Configuracao: descobre seu proprio ID automaticamente ao entrar na rede.
  * <ul>
- *   <li>Shard      = ID % 3 (ID 1 -> S1 [J..R], ID 2 -> S2 [S..Z], ID 3 -> S0 [A..I], ...)</li>
+ *   <li>Shard      = (ID - 1) % 3 (Ordem crescente: ID 1 -> S0 [A..I], ID 2 -> S1 [J..R], ID 3 -> S2 [S..Z], ID 4 -> S0 ...)</li>
  *   <li>Replica    = (ID - 1) / 3</li>
  *   <li>TCP        = 5000 + ID</li>
  *   <li>UDP        = 6000 + ID</li>

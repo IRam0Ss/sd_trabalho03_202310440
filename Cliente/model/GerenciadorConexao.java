@@ -141,7 +141,7 @@ public class GerenciadorConexao {
   public static int inferirShardPorPortaTcp(int pTcp) {
     if (pTcp > 5000 && pTcp < 5100) {
       int id = pTcp - 5000;
-      return id % 3;
+      return Math.floorMod(id - 1, NUM_SHARDS);
     }
     if (pTcp == Protocolo.PORTA_SERVIDOR_LEGACY) {
       return 0;

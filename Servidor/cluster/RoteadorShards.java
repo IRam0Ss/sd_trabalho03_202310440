@@ -75,13 +75,13 @@ public class RoteadorShards {
     void entregar(APDU apdu, String ipCliente, int portaUdpCliente, int saltos);
   }
 
-  /** Timeout seguro para redes Wi-Fi em operacoes de escrita inter-shard ROTEAR_OP (3000ms). */
-  public static final long TIMEOUT_PADRAO_MS = 3000;
-  /** Timeout seguro para redes Wi-Fi em CONSULTA_GLOBAL / Scatter-Gather de LIST, USERS e MEMBERS (2500ms). */
-  public static final long TIMEOUT_SCATTER_MS = 2500;
-  private static final long TIMEOUT_TENTATIVA_MS = 1200;
-  private static final int CONNECT_TIMEOUT_INTERSHARD_MS = 650;
-  private static final long TIMEOUT_SONDA_AMNESIA_MS = 1000;
+  /** Timeout seguro para redes Wi-Fi em operacoes de escrita inter-shard ROTEAR_OP (4500ms). */
+  public static final long TIMEOUT_PADRAO_MS = 4500;
+  /** Timeout seguro para redes Wi-Fi em CONSULTA_GLOBAL / Scatter-Gather de LIST, USERS e MEMBERS (3500ms). */
+  public static final long TIMEOUT_SCATTER_MS = 3500;
+  private static final long TIMEOUT_TENTATIVA_MS = 1800;
+  private static final int CONNECT_TIMEOUT_INTERSHARD_MS = 1500;
+  private static final long TIMEOUT_SONDA_AMNESIA_MS = 1500;
   private static final String TAG = "ROTEAMENTO";
 
   private final ConfigCluster config;
@@ -224,12 +224,10 @@ public class RoteadorShards {
         enviar(s, PortasShard.idDoNo(s, r), criarMsg(TipoMensagemCluster.ANUNCIO_SHARD, a));
       }
     }
-    // A cada 2 ciclos (~2s), emite anuncio UDP broadcast leve na LAN para descoberta cross-machine entre shards
-    if ((contadorCiclosAnuncio++ % 2) == 0) {
-      BeaconClusterLAN.dispararAnuncioShardLAN(
-          meuShard, config.getIdReplica(), config.getMeuId(), ctx.papel(), ctx.epoca(), ctx.idLiderAtivo(),
-          host, totalReplicas);
-    }
+    // Emite anuncio UDP broadcast leve na LAN a cada ciclo (~1s) para manter a tabela sempre fresca na rede fisica
+    BeaconClusterLAN.dispararAnuncioShardLAN(
+        meuShard, config.getIdReplica(), config.getMeuId(), ctx.papel(), ctx.epoca(), ctx.idLiderAtivo(),
+        host, totalReplicas);
   }
 
   /** Registra anuncio de outro shard recebido via farol UDP broadcast na LAN fisica. */

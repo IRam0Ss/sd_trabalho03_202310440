@@ -107,25 +107,17 @@ public class AtendimentoCliente implements Runnable {
             processarAPDU(apduRecebida);
           }
         } catch (EOFException | SocketException e) {
-          // Queda ou encerramento do socket TCP do cliente -> dispara faxina imediata
-          desconectarClienteInativoGlobal("Queda do socket TCP (" + e.getClass().getSimpleName() + ")");
+          // Socket TCP encerrado normalmente pelo cliente (fim do fluxo / modelo request-response de colegas)
           break;
         }
       }
     } catch (EOFException | SocketException e) {
-      desconectarClienteInativoGlobal("Encerramento abrupto do stream TCP (" + e.getClass().getSimpleName() + ")");
+      // Encerramento do socket pelo cliente
     } catch (IOException e) {
-      System.err.println("[ATENDIMENTO] [INFO] Conexao IO encerrada com o cliente: " + e.getMessage());
-      desconectarClienteInativoGlobal("Falha de I/O TCP (" + e.getMessage() + ")");
+      // Conexao IO finalizada
     } catch (Exception e) {
-      System.err.println("[ATENDIMENTO] [INFO] Conexao encerrada com o cliente: " + e.getMessage());
-      desconectarClienteInativoGlobal("Excecao na sessao TCP");
     } finally {
-      try {
-        desconectarClienteInativoGlobal("Fechamento da thread de atendimento");
-      } finally {
-        fecharSocketSilencioso();
-      }
+      fecharSocketSilencioso();
     }
   }
 
@@ -207,7 +199,10 @@ public class AtendimentoCliente implements Runnable {
     if (this.roteador == null || this.usuarioAssociado == null || this.usuarioAssociado.getNome() == null) {
       return false;
     }
-    if (System.currentTimeMillis() - this.ultimoRegistroOuJoinMs < 1200) {
+    if (this.gruposDaSessao == null || this.gruposDaSessao.isEmpty()) {
+      return false;
+    }
+    if (System.currentTimeMillis() - this.ultimoRegistroOuJoinMs < 2000) {
       return false;
     }
     String erroAmnesia = this.roteador.verificarAmnesiaSessao(this.usuarioAssociado.getNome(), this.gruposDaSessao);
@@ -418,9 +413,6 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.LIST:
-        if (verificarEDerrubarSeAmnesia()) {
-          break;
-        }
         List<String> grupos = (this.roteador != null)
             ? this.roteador.listarGruposGlobal()
             : this.gerenciador.listarGrupos();
@@ -433,9 +425,6 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.USERS:
-        if (verificarEDerrubarSeAmnesia()) {
-          break;
-        }
         Collection<InfoUser> usuarios = (this.roteador != null)
             ? this.roteador.coletarTodosUsuariosAtivos()
             : this.gerenciador.getTodosUsuariosAtivos();
@@ -453,9 +442,6 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.MEMBERS:
-        if (verificarEDerrubarSeAmnesia()) {
-          break;
-        }
         String grupoList = apdu.getNomeGrupo();
         if (this.roteador != null) {
           RoteadorShards.ResultadoMembros rm = this.roteador.listarMembrosGrupo(grupoList);
@@ -489,9 +475,6 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.BLOCK:
-        if (verificarEDerrubarSeAmnesia()) {
-          break;
-        }
         String usuarioABloquear = apdu.getDestinatario();
         String bloqueador = apdu.getNomeUsuario();
         Resultado resBlock = executarBloqueioGlobal(true, apdu.getIdRequisicao(), bloqueador, usuarioABloquear);
@@ -500,9 +483,6 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.UNBLOCK:
-        if (verificarEDerrubarSeAmnesia()) {
-          break;
-        }
         String usuarioADesbloquear = apdu.getDestinatario();
         String desbloqueador = apdu.getNomeUsuario();
         Resultado resUnblock = executarBloqueioGlobal(false, apdu.getIdRequisicao(), desbloqueador, usuarioADesbloquear);

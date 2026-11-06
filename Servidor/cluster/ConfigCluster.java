@@ -16,6 +16,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -209,13 +210,26 @@ public class ConfigCluster implements Serializable {
     }
   }
 
+  private static boolean isIdTotalmenteDisponivel(int k) {
+    if (isPortaEmUso("127.0.0.1", PortasShard.clusterDoNo(k))) {
+      return false;
+    }
+    if (!isPortaDisponivel("0.0.0.0", PortasShard.tcpDoNo(k))) {
+      return false;
+    }
+    if (!portaUdpLivre(PortasShard.udpDoNo(k))) {
+      return false;
+    }
+    return true;
+  }
+
   /**
-   * Descobre automaticamente o proprio ID ao entrar na rede (logica do T#02) e deriva todo o resto:
+   * Descobre automaticamente o proprio ID ao entrar na rede com priorizacao inteligente de Shards:
    * <ol>
-   *   <li>Sonda a rede (farol UDP global) e a maquina local (portas 7000+k) para listar IDs ocupados;</li>
-   *   <li>Escolhe o MENOR ID livre (ID 1 se for o pioneiro). Reaproveitar lacunas garante que um no
-   *       que caiu e voltou retorne ao MESMO shard, mantendo os 3 shards povoados;</li>
-   *   <li>{@code idShard = ID % 3}, {@code idReplica = (ID-1)/3};</li>
+   *   <li>Sonda a rede (farol UDP global) e a maquina local (portas 7000+k) para listar IDs e Shards ocupados;</li>
+   *   <li><b>Prioridade 1:</b> Garante a inicializacao de novos shards em ordem crescente (S0 [A..I], depois S1 [J..R], depois S2 [S..Z]);</li>
+   *   <li><b>Prioridade 2:</b> Somente quando todos os 3 shards tiverem nos ativos, aloca novos processos como STANDBY / REPLICA balanceados;</li>
+   *   <li>{@code idShard = (ID - 1) % 3}, {@code idReplica = (ID - 1) / 3};</li>
    *   <li>Portas: TCP=5000+ID, UDP=6000+ID, Cluster=7000+ID (bind em 0.0.0.0).</li>
    * </ol>
    *
@@ -226,16 +240,9 @@ public class ConfigCluster implements Serializable {
   }
 
   /**
-   * Descobre automaticamente o proprio ID ao entrar na rede (logica do T#02) e deriva todo o resto:
-   * <ol>
-   *   <li>Sonda a rede (farol UDP global) e a maquina local (portas 7000+k) para listar IDs ocupados;</li>
-   *   <li>Escolhe o MENOR ID livre (ID 1 se for o pioneiro). Reaproveitar lacunas garante que um no
-   *       que caiu e voltou retorne ao MESMO shard, mantendo os 3 shards povoados;</li>
-   *   <li>{@code idShard = ID % 3}, {@code idReplica = (ID-1)/3};</li>
-   *   <li>Portas: TCP=5000+ID, UDP=6000+ID, Cluster=7000+ID (bind em 0.0.0.0).</li>
-   * </ol>
+   * Descobre automaticamente o proprio ID ao entrar na rede com priorizacao inteligente de Shards:
    *
-   * @param idForcado      ID especifico opcional (se null, detecta automaticamente o menor livre).
+   * @param idForcado      ID especifico opcional (se null, detecta automaticamente com prioridade S0 -> S1 -> S2 -> Standby).
    * @param forcarLoopback se true anuncia 127.0.0.1 (testes isolados); caso contrario anuncia o IP da LAN.
    */
   public static synchronized ConfigCluster descobrirEConfigurarAutomatico(Integer idForcado, boolean forcarLoopback) {
@@ -252,6 +259,17 @@ public class ConfigCluster implements Serializable {
       }
     }
 
+    // Identifica quais shards ja possuem nos vivos e conta replicas por shard
+    Set<Integer> shardsCobertos = new HashSet<>();
+    int[] contagemPorShard = new int[Particionador.NUM_SHARDS];
+    for (int k : ocupados) {
+      int s = PortasShard.shardDoNo(k);
+      if (s >= 0 && s < Particionador.NUM_SHARDS) {
+        shardsCobertos.add(s);
+        contagemPorShard[s]++;
+      }
+    }
+
     int idEscolhido = -1;
     if (idForcado != null && idForcado > 0) {
       idEscolhido = idForcado;
@@ -264,27 +282,87 @@ public class ConfigCluster implements Serializable {
       }
       reservaCluster = reserva;
     } else {
-      for (int k = 1; k <= PortasShard.MAX_ID; k++) {
-        if (ocupados.contains(k)) {
-          continue;
+      // PRIORIDADE 1: Percorre os shards em ordem estritamente crescente (S0 -> S1 -> S2).
+      // Se algum shard AINDA NAO TEM no ativo, ele DEVE ser inicializado com prioridade maxima!
+      for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+        if (!shardsCobertos.contains(s)) {
+          for (int rep = 0; rep < PortasShard.MAX_REPLICAS; rep++) {
+            int candId = PortasShard.idDoNo(s, rep);
+            if (!ocupados.contains(candId) && isIdTotalmenteDisponivel(candId)) {
+              ServerSocket reserva = tentarReservar(PortasShard.clusterDoNo(candId));
+              if (reserva != null) {
+                if (reservaCluster != null) {
+                  try {
+                    reservaCluster.close();
+                  } catch (Exception ignored) {
+                  }
+                }
+                reservaCluster = reserva;
+                idEscolhido = candId;
+                ClusterLog.info("CONFIG:AUTO", String.format(
+                    "[PRIORIDADE-1: NOVO SHARD] Shard S%d (%s) sem lider ativo! Assumindo este shard (ID %d).",
+                    s, Particionador.nome(s), idEscolhido));
+                break;
+              }
+            }
+          }
+          if (idEscolhido > 0) break;
         }
-        // Garante que as portas do ID estao livres nesta maquina antes de assumi-lo
-        if (!isPortaDisponivel("0.0.0.0", PortasShard.tcpDoNo(k)) || !portaUdpLivre(PortasShard.udpDoNo(k))) {
-          continue;
-        }
-        ServerSocket reserva = tentarReservar(PortasShard.clusterDoNo(k));
-        if (reserva == null) {
-          continue; // outro processo local acabou de reivindicar este ID
-        }
-        if (reservaCluster != null) {
-          try {
-            reservaCluster.close();
-          } catch (Exception ignored) {
+      }
+
+      // PRIORIDADE 2: Se todos os 3 shards ja possuem nos ativos (S0, S1 e S2 estao no ar),
+      // este novo no entra como STANDBY / REPLICA no shard com menor numero de replicas (round-robin ordenado).
+      if (idEscolhido <= 0) {
+        int menorQtd = Integer.MAX_VALUE;
+        int shardAlvoStandby = 0;
+        for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+          if (contagemPorShard[s] < menorQtd) {
+            menorQtd = contagemPorShard[s];
+            shardAlvoStandby = s;
           }
         }
-        reservaCluster = reserva;
-        idEscolhido = k;
-        break;
+
+        for (int rep = 1; rep < PortasShard.MAX_REPLICAS; rep++) {
+          int candId = PortasShard.idDoNo(shardAlvoStandby, rep);
+          if (!ocupados.contains(candId) && isIdTotalmenteDisponivel(candId)) {
+            ServerSocket reserva = tentarReservar(PortasShard.clusterDoNo(candId));
+            if (reserva != null) {
+              if (reservaCluster != null) {
+                try {
+                  reservaCluster.close();
+                } catch (Exception ignored) {
+                }
+              }
+              reservaCluster = reserva;
+              idEscolhido = candId;
+              ClusterLog.info("CONFIG:AUTO", String.format(
+                  "[PRIORIDADE-2: STANDBY] Todos os shards ativos. Assumindo modo STANDBY para Shard S%d (%s) | Replica %d (ID %d).",
+                  shardAlvoStandby, Particionador.nome(shardAlvoStandby), rep, idEscolhido));
+              break;
+            }
+          }
+        }
+      }
+
+      // FALLBACK: varredura sequencial caso as prioridades tenham falhado em portas especificas
+      if (idEscolhido <= 0) {
+        for (int k = 1; k <= PortasShard.MAX_ID; k++) {
+          if (ocupados.contains(k) || !isIdTotalmenteDisponivel(k)) {
+            continue;
+          }
+          ServerSocket reserva = tentarReservar(PortasShard.clusterDoNo(k));
+          if (reserva != null) {
+            if (reservaCluster != null) {
+              try {
+                reservaCluster.close();
+              } catch (Exception ignored) {
+              }
+            }
+            reservaCluster = reserva;
+            idEscolhido = k;
+            break;
+          }
+        }
       }
     }
     if (idEscolhido <= 0) {
@@ -299,7 +377,7 @@ public class ConfigCluster implements Serializable {
         PortasShard.clusterDoNo(idEscolhido), PortasShard.tcpDoNo(idEscolhido),
         PortasShard.udpDoNo(idEscolhido), Protocolo.PORTA_DISCOVERY));
 
-    // Pares do MESMO shard (ID % 3 igual) entram na tabela de consenso local
+    // Pares do MESMO shard entram na tabela de consenso local
     for (int k : ocupados) {
       if (k == idEscolhido || PortasShard.shardDoNo(k) != idShard) {
         continue;
@@ -316,7 +394,7 @@ public class ConfigCluster implements Serializable {
         "IDs ja ocupados na rede: %s -> este no assumiu o ID %d%s",
         ocupados.isEmpty() ? "nenhum" : ocupados.toString(), idEscolhido, ocupados.isEmpty() ? " (pioneiro)" : ""));
     ClusterLog.info("CONFIG:AUTO", String.format(
-        "No %d -> Shard %s (ID %% 3 = %d) | Replica %d | Portas: TCP=%d, UDP=%d, Cluster=%d | Host anunciado: %s",
+        "No %d -> Shard %s (S%d) | Replica %d | Portas: TCP=%d, UDP=%d, Cluster=%d | Host anunciado: %s",
         idEscolhido, Particionador.nome(idShard), idShard, idReplica,
         PortasShard.tcpDoNo(idEscolhido), PortasShard.udpDoNo(idEscolhido), PortasShard.clusterDoNo(idEscolhido),
         meuHost));

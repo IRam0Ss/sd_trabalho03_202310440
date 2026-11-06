@@ -136,17 +136,18 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
           enviarHeartbeat();
           ClusterLog.heartbeatResumo(config.getNos().size(), visao.getParesVivos().size() + 1, idLiderAtivo);
 
-          boolean ativoCaiu = visao.verificarTimeouts(3000);
+          boolean ativoCaiu = visao.verificarTimeouts(6000);
           if (!ativoCaiu && idLiderAtivo > 0 && idLiderAtivo != config.getMeuId()) {
             VisaoCluster.ParEstado liderSt = visao.getPar(idLiderAtivo);
-            if (liderSt != null && (!liderSt.conectado || "DOWN".equalsIgnoreCase(liderSt.estado))) {
-              ClusterLog.aviso("ELEICAO", "Lider ativo conhecido (No " + idLiderAtivo + ") caiu ou esta inacessivel.");
+            if (liderSt != null && "DOWN".equalsIgnoreCase(liderSt.estado)
+                && (System.currentTimeMillis() - liderSt.ultimoHeartbeat > 6000)) {
+              ClusterLog.aviso("ELEICAO", "Lider ativo conhecido (No " + idLiderAtivo + ") expirou sem heartbeat ha mais de 6s.");
               ativoCaiu = true;
             }
           }
 
           if (ativoCaiu && !"ATIVO".equalsIgnoreCase(papel)) {
-            ClusterLog.eleicao("Lider ausente. Disparando eleicao para novo lider...");
+            ClusterLog.eleicao("Lider ausente ha mais de 6s. Disparando eleicao para novo lider...");
             int antigoLider = this.idLiderAtivo;
             this.idLiderAtivo = -1;
             if (antigoLider > 0) {

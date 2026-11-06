@@ -97,9 +97,9 @@ public class VisaoCluster implements Serializable {
     ParEstado p = pares.get(id);
     if (p != null) {
       p.conectado = conectado;
-      if (!conectado) {
-        p.estado = "DOWN";
-      }
+      // IMPORTANTE: NAO marcar p.estado = "DOWN" imediatamente em caso de desconexao momentanea.
+      // Em redes reais/Wi-Fi, reconexoes rapidas de TCP nao significam queda do lider.
+      // A declaracao de DOWN deve ocorrer somente quando o heartbeat expirar no metodo verificarTimeouts().
     }
   }
 
@@ -128,7 +128,7 @@ public class VisaoCluster implements Serializable {
   /**
    * Verifica expiracao de heartbeats e marca como DOWN nos que nao responderam no prazo.
    * 
-   * @param timeoutMs Tempo maximo sem heartbeat (ex: 3000 ms).
+   * @param timeoutMs Tempo maximo sem heartbeat (ex: 6000 ms).
    * @return true se o no que caiu era o ATIVO (engatilhando nova eleicao).
    */
   public synchronized boolean verificarTimeouts(long timeoutMs) {
@@ -136,8 +136,10 @@ public class VisaoCluster implements Serializable {
     boolean ativoCaiu = false;
 
     for (ParEstado p : pares.values()) {
-      if ("ATIVO".equalsIgnoreCase(p.estado) && (!p.conectado || agora - p.ultimoHeartbeat > timeoutMs)) {
-        System.out.println("[CLUSTER] [WARNING] Lider ATIVO (No " + p.id + ") desconectado ou sem heartbeat -> Marcado como DOWN");
+      // O lider ATIVO so cai se passar mais de timeoutMs sem nenhum heartbeat
+      if ("ATIVO".equalsIgnoreCase(p.estado) && (agora - p.ultimoHeartbeat > timeoutMs)) {
+        System.out.println("[CLUSTER] [WARNING] Lider ATIVO (No " + p.id + ") sem heartbeat ha "
+            + (agora - p.ultimoHeartbeat) + "ms -> Marcado como DOWN");
         ativoCaiu = true;
         p.estado = "DOWN";
         p.conectado = false;

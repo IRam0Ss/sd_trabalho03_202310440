@@ -11,9 +11,9 @@ package cluster;
 
 /**
  * Toda a identidade de um no e derivada do seu ID global (1..MAX_ID), atribuido automaticamente
- * na entrada da rede (menor ID livre). Nao ha configuracao manual:
+ * na entrada da rede (com prioridade crescente S0 -> S1 -> S2). Nao ha configuracao manual:
  * <pre>
- *   idShard    = id % 3            (ID 1 -> S1, ID 2 -> S2, ID 3 -> S0, ID 4 -> S1 ...)
+ *   idShard    = (id - 1) % 3      (ID 1 -> S0 [A..I], ID 2 -> S1 [J..R], ID 3 -> S2 [S..Z], ID 4 -> S0 ...)
  *   idReplica  = (id - 1) / 3      (indice da replica dentro do shard: 0, 1, 2 ...)
  *   TCP        = 5000 + id
  *   UDP        = 6000 + id
@@ -22,7 +22,7 @@ package cluster;
  * A porta legada TCP/UDP 5000 nunca colide (id >= 1) e continua reservada ao lider do Shard 0.
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 2.0
+ * @version 3.0
  */
 public final class PortasShard {
 
@@ -43,21 +43,22 @@ public final class PortasShard {
   // ID global <-> (shard, replica)
   // ---------------------------------------------------------------------------
 
-  /** Shard de um no: {@code id % 3}. */
+  /** Shard de um no: {@code (id - 1) % 3} (ordem crescente: ID 1 -> S0, ID 2 -> S1, ID 3 -> S2). */
   public static int shardDoNo(int id) {
-    return Math.floorMod(id, Particionador.NUM_SHARDS);
+    if (id <= 0) return 0;
+    return Math.floorMod(id - 1, Particionador.NUM_SHARDS);
   }
 
   /** Indice da replica dentro do shard: {@code (id - 1) / 3}. */
   public static int replicaDoNo(int id) {
+    if (id <= 0) return 0;
     return Math.max(0, (id - 1) / Particionador.NUM_SHARDS);
   }
 
   /** Inverso de {@link #shardDoNo}/{@link #replicaDoNo}: ID global da replica {@code r} do shard {@code s}. */
   public static int idDoNo(int idShard, int idReplica) {
     Particionador.validarShard(idShard);
-    int base = (idShard == 0) ? Particionador.NUM_SHARDS : idShard;
-    return idReplica * Particionador.NUM_SHARDS + base;
+    return idReplica * Particionador.NUM_SHARDS + idShard + 1;
   }
 
   // ---------------------------------------------------------------------------

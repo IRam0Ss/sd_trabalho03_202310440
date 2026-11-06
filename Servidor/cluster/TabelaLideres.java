@@ -19,7 +19,7 @@ package cluster;
  */
 public class TabelaLideres {
 
-  public static final long VALIDADE_MS = 4500;
+  public static final long VALIDADE_MS = 8000;
 
   private static class Entrada {
     int idLider = -1;

@@ -1405,14 +1405,8 @@ public class ClienteGUI extends Application implements MessageListener {
       }
     }
 
-    // Buscar ou criar historico
-    if (!chatHistories.containsKey(chatId)) {
-      VBox newHistory = new VBox(10);
-      newHistory.setPadding(new Insets(15));
-      chatHistories.put(chatId, newHistory);
-    }
-
-    VBox history = chatHistories.get(chatId);
+    // Buscar ou criar historico com auto-scroll reativo
+    VBox history = obterOuCriarHistorico(chatId);
     chatScroll.setContent(history);
 
     // Animar entrada do chat
@@ -1426,6 +1420,39 @@ public class ClienteGUI extends Application implements MessageListener {
     chatFade.setFromValue(0.0);
     chatFade.setToValue(1.0);
     chatFade.play();
+
+    rolarChatParaFim();
+  }
+
+  private VBox obterOuCriarHistorico(String chatId) {
+    if (!chatHistories.containsKey(chatId)) {
+      VBox newHistory = new VBox(10);
+      newHistory.setPadding(new Insets(15));
+      // Auto-scroll imediato quando novos elementos sao adicionados ao historico
+      newHistory.heightProperty().addListener((obs, oldVal, newVal) -> {
+        if (chatScroll != null && chatScroll.getContent() == newHistory) {
+          Platform.runLater(() -> {
+            chatScroll.layout();
+            chatScroll.setVvalue(1.0);
+          });
+        }
+      });
+      chatHistories.put(chatId, newHistory);
+    }
+    return chatHistories.get(chatId);
+  }
+
+  private void rolarChatParaFim() {
+    Platform.runLater(() -> {
+      if (chatScroll != null) {
+        chatScroll.layout();
+        Platform.runLater(() -> {
+          if (chatScroll != null) {
+            chatScroll.setVvalue(1.0);
+          }
+        });
+      }
+    });
   }
 
   private void onSendMessage(TextField txtMsg) {
@@ -1498,13 +1525,7 @@ public class ClienteGUI extends Application implements MessageListener {
 
   private void addChatBubble(String chatId, String senderName, String text, boolean sentByMe, boolean isPrivate,
       boolean isSystem, String idMensagem, boolean isVisualizacaoUnica) {
-    if (!chatHistories.containsKey(chatId)) {
-      VBox newHistory = new VBox(10);
-      newHistory.setPadding(new Insets(15));
-      chatHistories.put(chatId, newHistory);
-    }
-
-    VBox history = chatHistories.get(chatId);
+    VBox history = obterOuCriarHistorico(chatId);
 
     HBox row = new HBox();
     row.setPadding(new Insets(4, 0, 4, 0));
@@ -1637,6 +1658,10 @@ public class ClienteGUI extends Application implements MessageListener {
     slide.setFromY(10);
     slide.setToY(0);
     slide.play();
+
+    if (currentChat != null && currentChat.equals(chatId)) {
+      rolarChatParaFim();
+    }
   }
 
   private void showVuModalOverlay(String idMensagem, String senderName, String secretText, String chatId, boolean isPrivate, Button btnOpenVU) {

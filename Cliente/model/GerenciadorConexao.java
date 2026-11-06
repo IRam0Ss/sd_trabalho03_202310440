@@ -412,10 +412,10 @@ public class GerenciadorConexao {
    * Nao derruba conexoes com servidores de colegas que respondem OK sem o texto "ATIVO".
    */
   public void iniciarMonitoramento() {
-    Thread threadPing = new Thread(() -> {
+    Thread threadMonitor = new Thread(() -> {
       while (executando) {
         try {
-          Thread.sleep(1500);
+          Thread.sleep(2000);
         } catch (InterruptedException e) {
           break;
         }
@@ -424,37 +424,16 @@ public class GerenciadorConexao {
           continue;
         }
 
-        // 1. Verificacao de liveness do socket TCP local
-        if (tcp == null || !tcp.isConectado()) {
-          System.out.println("[FAILOVER] [WARNING] Socket TCP desconectado. Disparando busca por nova porta de entrada...");
+        // Verificacao ativa de liveness do socket TCP local (detecta FIN / CLOSE_WAIT sem PING de rede)
+        if (tcp == null || !tcp.verificarConexaoAtiva()) {
+          System.out.println("[FAILOVER] [WARNING] Queda ou fechamento do socket TCP detectado. Disparando busca por nova porta de entrada...");
           if (tcp != null) tcp.fecharConexao();
-          executarFailover();
-          continue;
-        }
-
-        // 2. Sondagem suave de canal TCP
-        try {
-          APDU resPing = tcp.pingDireto();
-          // IMPORTANTE: NAO derruba conexao se a resposta nao contiver a palavra "ATIVO"!
-          // Servidores de colegas respondem OK: pong, OK, ou texto livre.
-          // Apenas se o no indicar explicitamente papel STANDBY ou NAO_LIDER
-          if (resPing != null && Protocolo.ERRO.equals(resPing.getOperacao())
-              && ("STANDBY".equalsIgnoreCase(resPing.getTextoMensagem()) || "NAO_LIDER".equalsIgnoreCase(resPing.getTextoMensagem()))) {
-            System.out.println("[FAILOVER] [WARNING] No atual indicou papel STANDBY. Disparando failover...");
-            tcp.fecharConexao();
-            executarFailover();
-          }
-        } catch (IOException e) {
-          if (!executando) break;
-          System.out.println("[FAILOVER] [WARNING] Queda real do socket TCP ("
-              + e.getClass().getSimpleName() + ": " + e.getMessage() + "). Disparando busca por nova porta de entrada...");
-          tcp.fecharConexao();
           executarFailover();
         }
       }
     }, "Thread-Cliente-MonitoramentoSocket");
-    threadPing.setDaemon(true);
-    threadPing.start();
+    threadMonitor.setDaemon(true);
+    threadMonitor.start();
   }
 
   /**
@@ -607,18 +586,8 @@ public class GerenciadorConexao {
               boolean validado = false;
               InfoUser novoInfo = null;
 
-              // 1. Tenta primeiro PING brando (se responder OK com qualquer texto, o no e ATIVO e funcional)
-              try {
-                APDU resPing = tcp.pingDireto();
-                if (resPing != null && Protocolo.OK.equals(resPing.getOperacao())) {
-                  validado = true;
-                }
-              } catch (Exception ignored) {
-                // Colegas podem nao suportar PING; continua para validacao com REGISTER
-              }
-
-              // 2. Se PING nao respondeu OK, valida via REGISTER direto (compativel com qualquer servidor de colega)
-              if (!validado && usuarioAtual != null) {
+              // Validacao direta da nova porta de entrada via REGISTER direto (padrao universal, sem dependencia de PING)
+              if (usuarioAtual != null) {
                 novoInfo = new InfoUser(usuarioAtual.getNome(), tcp.getIpLocal(), udp.getPortaLocal());
                 try {
                   APDU resReg = tcp.registerDireto(novoInfo);
@@ -631,8 +600,7 @@ public class GerenciadorConexao {
                   }
                 } catch (Exception ignored) {
                 }
-              } else if (!validado) {
-                // Caso extremo sem usuario: testa abertura simples
+              } else {
                 validado = true;
               }
 

@@ -136,26 +136,27 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
           enviarHeartbeat();
           ClusterLog.heartbeatResumo(config.getNos().size(), visao.getParesVivos().size() + 1, idLiderAtivo);
 
-          boolean ativoCaiu = visao.verificarTimeouts(6000);
-          if (!ativoCaiu && idLiderAtivo > 0 && idLiderAtivo != config.getMeuId()) {
-            VisaoCluster.ParEstado liderSt = visao.getPar(idLiderAtivo);
-            if (liderSt != null && "DOWN".equalsIgnoreCase(liderSt.estado)
-                && (System.currentTimeMillis() - liderSt.ultimoHeartbeat > 6000)) {
-              ClusterLog.aviso("ELEICAO", "Lider ativo conhecido (No " + idLiderAtivo + ") expirou sem heartbeat ha mais de 6s.");
-              ativoCaiu = true;
+          long decorrido = System.currentTimeMillis() - inicioMs;
+          if (decorrido > 3000) {
+            boolean ativoCaiu = visao.verificarTimeouts(6000);
+            if (!ativoCaiu && idLiderAtivo > 0 && idLiderAtivo != config.getMeuId()) {
+              VisaoCluster.ParEstado liderSt = visao.getPar(idLiderAtivo);
+              if (liderSt != null && "DOWN".equalsIgnoreCase(liderSt.estado)
+                  && (liderSt.ultimoHeartbeat > 0 && (System.currentTimeMillis() - liderSt.ultimoHeartbeat > 6000))) {
+                ClusterLog.aviso("ELEICAO", "Lider ativo conhecido (No " + idLiderAtivo + ") expirou sem heartbeat ha mais de 6s.");
+                ativoCaiu = true;
+              }
             }
-          }
 
-          if (ativoCaiu && !"ATIVO".equalsIgnoreCase(papel)) {
-            ClusterLog.eleicao("Lider ausente ha mais de 6s. Disparando eleicao para novo lider...");
-            int antigoLider = this.idLiderAtivo;
-            this.idLiderAtivo = -1;
-            if (antigoLider > 0) {
-              visao.marcarDown(antigoLider);
+            if (ativoCaiu && !"ATIVO".equalsIgnoreCase(papel)) {
+              ClusterLog.eleicao("Lider ausente ha mais de 6s. Disparando eleicao para novo lider...");
+              int antigoLider = this.idLiderAtivo;
+              this.idLiderAtivo = -1;
+              if (antigoLider > 0) {
+                visao.marcarDown(antigoLider);
+              }
+              dispararEleicao();
             }
-            dispararEleicao();
-          } else if (idLiderAtivo <= 0 && "STANDBY".equalsIgnoreCase(papel)) {
-            dispararEleicao();
           }
 
           // Se estiver iniciando e apos timeout nenhum lider foi detectado
@@ -201,35 +202,158 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
 
     // Verifica se ha algum lider ativo nos pares
     int ativoConhecido = visao.getIdAtivoAtual();
-    if (ativoConhecido > 0) {
+    if (ativoConhecido > 0 && ativoConhecido != config.getMeuId()) {
       ClusterLog.info("CLUSTER", "Lider ativo detectado no No " + ativoConhecido + ". Solicitando sincronizacao...");
       this.idLiderAtivo = ativoConhecido;
       this.papel = "SINCRONIZANDO";
       MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
       pedido.setVersao(gerenciador.getVersao());
       canal.enviar(ativoConhecido, pedido);
+      return;
+    }
+
+    // Se algum no com menor ID existir no meu shard, este no DEVE assumir papel de STANDBY!
+    int meuId = config.getMeuId();
+    boolean temMenorIdEsperado = false;
+    int menorIdEncontrado = -1;
+    for (ConfigCluster.NoInfo outro : config.getOutrosNos()) {
+      if (outro.id < meuId) {
+        temMenorIdEsperado = true;
+        menorIdEncontrado = outro.id;
+        break;
+      }
+    }
+
+    if (temMenorIdEsperado) {
+      ClusterLog.info("CLUSTER", String.format(
+          "Shard S%d | Replica %d (No %d): No %d possui menor ID. Assumindo papel de STANDBY e solicitando snapshot.",
+          config.getIdShard(), config.getIdReplica(), meuId, menorIdEncontrado));
+      this.papel = "STANDBY";
+      this.idLiderAtivo = menorIdEncontrado;
+      MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, meuId);
+      pedido.setVersao(gerenciador.getVersao());
+      canal.enviar(menorIdEncontrado, pedido);
+      return;
+    }
+
+    ClusterLog.lider("Nenhum lider ativo encontrado na rede. Assumindo lideranca pioneira (No " + meuId + ")...");
+    assumirComoAtivo();
+  }
+
+  private void aguardarConexaoSaida(int parId, int timeoutMs) {
+    long limite = System.currentTimeMillis() + timeoutMs;
+    while (!canal.isParConectado(parId) && System.currentTimeMillis() < limite) {
+      try {
+        Thread.sleep(30);
+      } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+        break;
+      }
+    }
+  }
+
+  /**
+   * Chamado quando o Beacon UDP descobre dinamicamente um novo par do mesmo Shard.
+   * Executa a regra de eleicao e subordinacao hierarquica deterministica (menor ID prevalece).
+   */
+  public synchronized void notificarNovoParDescoberto(ConfigCluster.NoInfo novoPar) {
+    if (novoPar == null || novoPar.idShard != config.getIdShard()) {
+      return;
+    }
+    visao.adicionarParSeAusente(novoPar);
+    int portaClusterReal = PortasShard.clusterDoNo(novoPar.id);
+    canal.adicionarParSeAusente(novoPar.id, novoPar.host, portaClusterReal);
+
+    int meuId = config.getMeuId();
+    int parId = novoPar.id;
+
+    ClusterLog.info("BEACON:SHARD", String.format(
+        "Par descoberto: No %d. Meu ID: %d. Resolvendo lideranca...",
+        parId, meuId));
+
+    // Regra de Subordinacao e Hierarquia Intra-Shard:
+    // O no com menor ID e a autoridade pioneira / lider natural quando as versoes sao iguais.
+    if (parId < meuId) {
+      if ("ATIVO".equalsIgnoreCase(this.papel)) {
+        ClusterLog.cura(String.format(
+            "[BEACON:SHARD] Par descoberto: No %d. Meu ID: %d. No %d possui menor ID: cedendo lideranca e transicionando para STANDBY.",
+            parId, meuId, parId));
+        rebaixarParaStandby(parId, this.epoca);
+        this.papel = "SINCRONIZANDO";
+        aguardarConexaoSaida(parId, 300);
+        MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, meuId);
+        pedido.setVersao(gerenciador.getVersao());
+        canal.enviar(parId, pedido);
+      } else if ("INICIANDO".equalsIgnoreCase(this.papel)) {
+        ClusterLog.info("BEACON:SHARD", String.format(
+            "[BEACON:SHARD] Par descoberto: No %d. Meu ID: %d. Reconhecendo No %d como lider pioneiro (STANDBY).",
+            parId, meuId, parId));
+        this.idLiderAtivo = parId;
+        this.papel = "SINCRONIZANDO";
+        aguardarConexaoSaida(parId, 300);
+        MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, meuId);
+        pedido.setVersao(gerenciador.getVersao());
+        canal.enviar(parId, pedido);
+      } else if ("STANDBY".equalsIgnoreCase(this.papel)) {
+        // Ja em STANDBY: apenas garante idLiderAtivo apontando para o menor ID
+        this.idLiderAtivo = parId;
+      }
     } else {
-      // Se algum no com menor ID existir e estiver conectando/vivo, aguarda por ele ou fica em STANDBY
-      int meuId = config.getMeuId();
-      boolean temMenorIdEsperado = false;
-      for (ConfigCluster.NoInfo outro : config.getOutrosNos()) {
-        if (outro.id < meuId) {
-          VisaoCluster.ParEstado st = visao.getPar(outro.id);
-          // Se o par com menor id estiver conectado ou o tempo decorrido for menor que 3000ms, da prioridade a ele
-          if (st != null && (st.conectado || decorrido < 3000)) {
-            temMenorIdEsperado = true;
-            break;
-          }
+      // Se eu sou o menor ID (ex: Meu=1 vs Par=4) e sou ATIVO:
+      if ("ATIVO".equalsIgnoreCase(this.papel)) {
+        ClusterLog.lider(String.format(
+            "[BEACON:SHARD] Par descoberto: No %d. Meu ID: %d. Sou o lider ATIVO (menor ID). Impondo lideranca ao No %d.",
+            parId, meuId, parId));
+        aguardarConexaoSaida(parId, 300);
+        ConfigCluster.NoInfo meuInfo = config.getMeuNoInfo();
+        MensagemCluster coord = new MensagemCluster(TipoMensagemCluster.COORDENADOR, meuId);
+        coord.setEpoca(this.epoca);
+        coord.setVersao(gerenciador.getVersao());
+        coord.setPortaTcpServico(meuInfo.portaTcp);
+        coord.setPortaUdpServico(meuInfo.portaUdp);
+        canal.enviar(parId, coord);
+      }
+    }
+  }
+
+  /**
+   * Chamado quando um anuncio EDEN_SHARD_LAN e recebido de outro host para o MESMO Shard.
+   * Detecta split-brain entre maquinas fisicas ou descobre replicas na LAN.
+   */
+  public synchronized void processarAnuncioMesmoShardLAN(
+      int shardRemoto, int replicaRemota, int idNoRemoto, String papelRemoto, long epocaRemota, int idLiderRemoto, String hostRemoto) {
+    int meuId = config.getMeuId();
+    String meuHost = config.getMeuNoInfo().host;
+    if (hostRemoto == null || (idNoRemoto == meuId && (hostRemoto.equals(meuHost) || ("127.0.0.1".equals(hostRemoto) && "127.0.0.1".equals(meuHost))))) {
+      return;
+    }
+    // 1. Colisao de ID entre hosts fisicos (duas maquinas diferentes assumiram o mesmo ID)
+    if (idNoRemoto == meuId) {
+      ClusterLog.conflito(String.format(
+          "[COLISAO:LAN] Outra maquina (%s) reivindica o ID %d no Shard S%d (Papel remoto: %s vs Meu papel: %s)!",
+          hostRemoto, meuId, config.getIdShard(), papelRemoto, this.papel));
+
+      if ("ATIVO".equalsIgnoreCase(this.papel)) {
+        long minhaVersao = gerenciador.getVersao();
+        // Desempate deterministico por IP se versoes forem identicas (0): o IP maior cede e vira Standby
+        boolean euCedo = (minhaVersao == 0 && meuHost.compareTo(hostRemoto) > 0);
+        if (euCedo) {
+          ClusterLog.cura(String.format(
+              "Meu host (%s) > Host remoto (%s): cedendo ID %d e assumindo modo STANDBY.",
+              meuHost, hostRemoto));
+          rebaixarParaStandby(idNoRemoto, epocaRemota);
         }
       }
-
-      if (temMenorIdEsperado) {
-        return; // Aguarda o no de menor ID se apresentar ou assumir
-      }
-
-      ClusterLog.lider("Nenhum lider ativo encontrado na rede. Assumindo lideranca pioneira (No " + meuId + ")...");
-      assumirComoAtivo();
+      return;
     }
+
+    // 2. Par do mesmo shard com ID diferente (ex: No 1 vs No 4)
+    ConfigCluster.NoInfo parInfo = new ConfigCluster.NoInfo(
+        idNoRemoto, config.getIdShard(), replicaRemota, hostRemoto,
+        PortasShard.clusterDoNo(idNoRemoto), PortasShard.tcpDoNo(idNoRemoto),
+        PortasShard.udpDoNo(idNoRemoto), Protocolo.PORTA_DISCOVERY
+    );
+    notificarNovoParDescoberto(parInfo);
   }
 
   /**
@@ -348,9 +472,9 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     coord.setPortaUdpServico(info.portaUdp);
     canal.broadcast(coord);
 
-    // Dispara notificacao SERVER_CHANGED para todos os clientes registrados
+    // Dispara notificacao SERVER_CHANGED para todos os clientes registrados (locais e cross-shard)
     NotificadorClientes.notificarServerChanged(
-        gerenciador.getTodosUsuariosAtivos(),
+        gerenciador.getTodosDestinatariosNotificacao(),
         info.host,
         info.portaTcp,
         info.portaUdp,
@@ -377,7 +501,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
       ConfigCluster.NoInfo infoNovoLider = config.getNos().get(novoLider);
       if (infoNovoLider != null) {
         NotificadorClientes.notificarServerChanged(
-            gerenciador.getTodosUsuariosAtivos(),
+            gerenciador.getTodosDestinatariosNotificacao(),
             infoNovoLider.host,
             infoNovoLider.portaTcp,
             infoNovoLider.portaUdp,
@@ -413,15 +537,10 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     } else if (minhaVersao < versaoPar) {
       euVenci = false;
     } else {
-      // CRITERIO 2: Epoca
-      if (this.epoca > parEpoca) {
-        euVenci = true;
-      } else if (this.epoca < parEpoca) {
-        euVenci = false;
-      } else {
-        // CRITERIO 3: Desempate deterministico por menor ID
-        euVenci = (config.getMeuId() < parId);
-      }
+      // CRITERIO 2: Desempate deterministico absoluto por menor ID.
+      // O no pioneiro (menor ID) do shard sempre vence quando as versoes de dados sao iguais.
+      // Isto elimina Split-Brain e impede que uma replica secundaria sequestre a lideranca do pioneiro.
+      euVenci = (config.getMeuId() < parId);
     }
 
     if (euVenci) {
@@ -486,13 +605,8 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         msg.getPortaUdpServico()
     );
 
-    // Se receber qualquer mensagem com epoca maior, verifica se ha conflito de lideres ativos ou atualiza epoca
-    if (msg.getEpoca() > this.epoca) {
-      if ("ATIVO".equalsIgnoreCase(this.papel) && "ATIVO".equalsIgnoreCase(msg.getEstadoOrigem()) && msg.getIdOrigem() != config.getMeuId()) {
-        resolverConflitoLideranca(msg);
-      } else if (!"ATIVO".equalsIgnoreCase(this.papel)) {
-        this.epoca = msg.getEpoca();
-      }
+    if (msg.getEpoca() > this.epoca && !"ATIVO".equalsIgnoreCase(this.papel)) {
+      this.epoca = msg.getEpoca();
     }
 
     switch (msg.getTipo()) {
@@ -566,27 +680,29 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         break;
 
       case COORDENADOR:
-        if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
-          resolverConflitoLideranca(msg);
-        } else if (msg.getEpoca() >= this.epoca) {
+        if (msg.getIdOrigem() == config.getMeuId()) {
+          break;
+        }
+        if (msg.getEpoca() >= this.epoca) {
           this.idLiderAtivo = msg.getIdOrigem();
           this.epoca = msg.getEpoca();
-          if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
+          if ("ATIVO".equalsIgnoreCase(this.papel)) {
+            ClusterLog.cura(String.format(
+                "Recebido COORDENADOR com epoca %d do No %d. Cedendo lideranca e rebaixando para STANDBY.",
+                msg.getEpoca(), msg.getIdOrigem()));
             rebaixarParaStandby(msg.getIdOrigem(), msg.getEpoca());
-          } else if (!"ATIVO".equalsIgnoreCase(this.papel)) {
-            this.papel = "STANDBY";
-            if (gerenciador.getVersao() < msg.getVersao()) {
-              ClusterLog.info("CLUSTER", "Versao local (" + gerenciador.getVersao() + ") defasada em relacao ao lider (" + msg.getVersao() + "). Solicitando SNAPSHOT...");
-              this.papel = "SINCRONIZANDO";
-              MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
-              pedido.setVersao(gerenciador.getVersao());
-              canal.enviar(msg.getIdOrigem(), pedido);
-            }
           }
+          this.papel = "STANDBY";
           ClusterLog.lider(String.format(
               "Novo lider anunciado no Shard %s: Replica %d / No %d (Epoca: %d, Versao: %d)",
-              Particionador.nome(config.getIdShard()), msg.getIdOrigem() - 1, msg.getIdOrigem(),
+              Particionador.nome(config.getIdShard()), PortasShard.replicaDoNo(msg.getIdOrigem()), msg.getIdOrigem(),
               msg.getEpoca(), msg.getVersao()));
+
+          ClusterLog.info("CLUSTER", "Solicitando SNAPSHOT do lider No " + msg.getIdOrigem() + "...");
+          this.papel = "SINCRONIZANDO";
+          MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
+          pedido.setVersao(gerenciador.getVersao());
+          canal.enviar(msg.getIdOrigem(), pedido);
         } else {
           ClusterLog.aviso("CLUSTER", "Ignorando COORDENADOR obsoleto do No " + msg.getIdOrigem()
               + " (Epoca " + msg.getEpoca() + " < Minha " + this.epoca + ")");

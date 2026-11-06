@@ -86,6 +86,44 @@ public class ClienteTCP {
   }
 
   /**
+   * Verifica ativamente se o socket TCP ainda esta aberto e conectado com o servidor.
+   * Detecta se o servidor fechou o socket (FIN recebido -> in.read() retorna -1) ou se o socket
+   * entrou em CLOSE_WAIT, lancando EOFException/SocketException.
+   * Retorna true apenas se a conexao estiver genuinamente ativa.
+   */
+  public boolean verificarConexaoAtiva() {
+    synchronized (ioLock) {
+      if (conexaoTCP == null || conexaoTCP.isClosed() || !conexaoTCP.isConnected()
+          || conexaoTCP.isInputShutdown() || conexaoTCP.isOutputShutdown()) {
+        return false;
+      }
+      try {
+        int timeoutOriginal = conexaoTCP.getSoTimeout();
+        try {
+          conexaoTCP.setSoTimeout(15);
+          int b = conexaoTCP.getInputStream().read();
+          if (b == -1) {
+            fecharConexaoInterno();
+            return false;
+          }
+        } catch (java.net.SocketTimeoutException ste) {
+          // Timeout de 15ms: canal esta vivo e sem dados pendentes (saudavel)
+          return true;
+        } finally {
+          try {
+            conexaoTCP.setSoTimeout(timeoutOriginal);
+          } catch (Exception ignored) {
+          }
+        }
+      } catch (Exception e) {
+        fecharConexaoInterno();
+        return false;
+      }
+      return true;
+    }
+  }
+
+  /**
    * Altera dinamicamente o servidor de destino (usado no failover para outro Shard/Replica).
    */
   public void setDestino(String novoIp, int novaPorta) throws IOException {
@@ -268,8 +306,8 @@ public class ClienteTCP {
       boolean ehThreadUi = nomeThread != null
           && (nomeThread.contains("JavaFX") || nomeThread.contains("AWT-EventQueue"));
 
-      if (Protocolo.PING.equals(op) || ehThreadUi) {
-        // Dispara failover puramente assincrono sem jamais bloquear PING ou a Thread da UI!
+      if (ehThreadUi) {
+        // Dispara failover puramente assincrono sem jamais bloquear a Thread da UI!
         new Thread(() -> listener.onQuedaSocketTCP(erroInicial), "Thread-Trigger-Failover").start();
         return new APDU(Protocolo.ERRO, null, null, "Conexao perdida: reconectando via Discovery UDP...", 0);
       }

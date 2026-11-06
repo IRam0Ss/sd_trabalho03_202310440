@@ -609,79 +609,31 @@ public class ClienteGUI extends Application implements MessageListener {
 
       System.out.println("[GUI] Candidatos de conexao obtidos (Discovery/Config): " + listaEnderecos);
 
-      // 1. Procura primeiro quem responder como "ATIVO" ou aceitar REGISTER diretamente
+      // Valida conexao e registra diretamente no candidato encontrado
       for (EnderecoServidor end : listaEnderecos) {
         try {
           System.out.println("[GUI] Testando lider em " + end + "...");
           ClienteTCP tcpTentativa = new ClienteTCP(end.host, end.portaTcp);
-          boolean aceito = false;
-
-          try {
-            APDU pingRes = tcpTentativa.pingDireto();
-            if (pingRes != null && Protocolo.OK.equals(pingRes.getOperacao())) {
-              aceito = true;
-            }
-          } catch (Exception ignored) {
-            // Colegas podem nao suportar PING; tenta REGISTER direto abaixo
-          }
-
-          if (!aceito) {
-            // Tenta validar diretamente via REGISTER
-            try {
-              ClienteUDP udpTemp = new ClienteUDP(end.host, end.portaUdp);
-              InfoUser usuarioTemp = new InfoUser(nome, tcpTentativa.getIpLocal(), udpTemp.getPortaLocal());
-              APDU regRes = tcpTentativa.register(usuarioTemp);
-              if (regRes != null && (Protocolo.OK.equals(regRes.getOperacao())
-                  || (regRes.getTextoMensagem() != null && regRes.getTextoMensagem().toLowerCase().contains("registrado")))) {
-                aceito = true;
-                resRegistro = regRes;
-                usuario = usuarioTemp;
-                udpNovo = udpTemp;
-                udpNovo.setListener(this);
-                udpNovo.setMeuNome(nome);
-              }
-            } catch (Exception exReg) {
-              erroMsg = exReg.getMessage();
-            }
-          }
-
-          if (aceito) {
+          ClienteUDP udpTemp = new ClienteUDP(end.host, end.portaUdp);
+          InfoUser usuarioTemp = new InfoUser(nome, tcpTentativa.getIpLocal(), udpTemp.getPortaLocal());
+          APDU regRes = tcpTentativa.register(usuarioTemp);
+          if (regRes != null && (Protocolo.OK.equals(regRes.getOperacao())
+              || (regRes.getTextoMensagem() != null && regRes.getTextoMensagem().toLowerCase().contains("registrado")))) {
             System.out.println("[GUI] Lider/Porta de entrada confirmada em " + end);
             tcpNovo = tcpTentativa;
-            if (udpNovo == null) {
-              udpNovo = new ClienteUDP(end.host, end.portaUdp);
-              udpNovo.setListener(this);
-              udpNovo.setMeuNome(nome);
-              usuario = new InfoUser(nome, tcpNovo.getIpLocal(), udpNovo.getPortaLocal());
-              resRegistro = tcpNovo.register(usuario);
-            }
+            resRegistro = regRes;
+            usuario = usuarioTemp;
+            udpNovo = udpTemp;
+            udpNovo.setListener(this);
+            udpNovo.setMeuNome(nome);
             liderEncontrado = end;
             break;
           } else {
             tcpTentativa.fecharConexao();
+            udpTemp.fecharConexao();
           }
-        } catch (Exception ex) {
-          System.out.println("[GUI] Falha ao sondar " + end + ": " + ex.getMessage());
-          erroMsg = ex.getMessage();
-        }
-      }
-
-      // 2. Fallback compativel com servidores legados (T#01) que nao implementam PING
-      if (liderEncontrado == null) {
-        for (EnderecoServidor end : listaEnderecos) {
-          try {
-            ClienteTCP tcpTentativa = new ClienteTCP(end.host, end.portaTcp);
-            udpNovo = new ClienteUDP(end.host, end.portaUdp);
-            udpNovo.setListener(this);
-            udpNovo.setMeuNome(nome);
-            usuario = new InfoUser(nome, tcpTentativa.getIpLocal(), udpNovo.getPortaLocal());
-            resRegistro = tcpTentativa.register(usuario);
-            tcpNovo = tcpTentativa;
-            liderEncontrado = end;
-            break;
-          } catch (Exception ex) {
-            erroMsg = ex.getMessage();
-          }
+        } catch (Exception exReg) {
+          erroMsg = exReg.getMessage();
         }
       }
 

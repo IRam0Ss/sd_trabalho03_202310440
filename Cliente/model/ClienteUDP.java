@@ -56,8 +56,12 @@ public class ClienteUDP implements Runnable {
     if (porta == Protocolo.PORTA_SERVIDOR_LEGACY) {
       return 0;
     }
-    if (porta >= 6000 && porta < 6300) {
-      return (porta - 6000) / 100;
+    if (porta > 6000 && porta < 6100) {
+      int id = porta - 6000;
+      return Math.floorMod(id - 1, 3);
+    }
+    if (porta >= 7777 && porta <= 7779) {
+      return porta - 7777;
     }
     return -1;
   }

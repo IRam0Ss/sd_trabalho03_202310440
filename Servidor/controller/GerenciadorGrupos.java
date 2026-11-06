@@ -649,6 +649,16 @@ public class GerenciadorGrupos implements Serializable {
     return new HashSet<>(usuarios.values());
   }
 
+  /**
+   * Retorna a uniao de todos os usuarios ativos cadastrados nesta particao com os endpoints de
+   * membros cross-shard salvos nesta particao (usado para broadcast integral de failover SERVER_CHANGED).
+   */
+  public synchronized Set<InfoUser> getTodosDestinatariosNotificacao() {
+    Set<InfoUser> uniao = new HashSet<>(usuarios.values());
+    uniao.addAll(endpointsMembros.values());
+    return uniao;
+  }
+
   public synchronized InfoUser buscarUsuarioPorNome(String nome) {
     if (nome == null) {
       return null;

@@ -52,7 +52,7 @@ public class VisaoCluster implements Serializable {
       this.epoca = 0;
       this.versao = 0;
       this.hash = 0;
-      this.ultimoHeartbeat = 0;
+      this.ultimoHeartbeat = System.currentTimeMillis();
       this.conectado = false;
     }
 
@@ -137,13 +137,13 @@ public class VisaoCluster implements Serializable {
 
     for (ParEstado p : pares.values()) {
       // O lider ATIVO so cai se passar mais de timeoutMs sem nenhum heartbeat
-      if ("ATIVO".equalsIgnoreCase(p.estado) && (agora - p.ultimoHeartbeat > timeoutMs)) {
+      if ("ATIVO".equalsIgnoreCase(p.estado) && p.ultimoHeartbeat > 0 && (agora - p.ultimoHeartbeat > timeoutMs)) {
         System.out.println("[CLUSTER] [WARNING] Lider ATIVO (No " + p.id + ") sem heartbeat ha "
             + (agora - p.ultimoHeartbeat) + "ms -> Marcado como DOWN");
         ativoCaiu = true;
         p.estado = "DOWN";
         p.conectado = false;
-      } else if (p.isVivo() && (agora - p.ultimoHeartbeat > timeoutMs)) {
+      } else if (p.isVivo() && p.ultimoHeartbeat > 0 && (agora - p.ultimoHeartbeat > timeoutMs)) {
         System.out.println("[CLUSTER] [WARNING] No " + p.id + " sem heartbeat ha " + (agora - p.ultimoHeartbeat)
             + "ms -> Marcado como DOWN (era: " + p.estado + ")");
         p.estado = "DOWN";

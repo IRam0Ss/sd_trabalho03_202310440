@@ -137,11 +137,20 @@ public class ConfigCluster implements Serializable {
           info.idShard, info.idReplica, this.idShard));
       return;
     }
+    // Mapeamento estrito e deterministico derivado do ID global (7000 + ID_DO_PAR)
+    int portaClusterCorreta = PortasShard.clusterDoNo(info.id);
+    int portaTcpCorreta = PortasShard.tcpDoNo(info.id);
+    int portaUdpCorreta = PortasShard.udpDoNo(info.id);
+    NoInfo infoAjustada = new NoInfo(
+        info.id, info.idShard, info.idReplica, info.host,
+        portaClusterCorreta, portaTcpCorreta, portaUdpCorreta, info.portaDiscovery);
+
     if (!nos.containsKey(info.id)) {
-      nos.put(info.id, info);
+      nos.put(info.id, infoAjustada);
       ClusterLog.info("CONFIG", String.format(
-          "Nova replica integrada ao Shard S%d: Replica %d (%s:%d)",
-          info.idShard, info.idReplica, info.host, info.portaCluster));
+          "Nova replica integrada ao Shard S%d: Replica %d (No %d: %s, cluster=%d, tcp=%d)",
+          infoAjustada.idShard, infoAjustada.idReplica, infoAjustada.id, infoAjustada.host,
+          infoAjustada.portaCluster, infoAjustada.portaTcp));
     }
   }
 
@@ -236,21 +245,28 @@ public class ConfigCluster implements Serializable {
    * @param forcarLoopback se true anuncia 127.0.0.1 (testes isolados); caso contrario anuncia o IP da LAN.
    */
   public static synchronized ConfigCluster descobrirEConfigurarAutomatico(boolean forcarLoopback) {
-    return descobrirEConfigurarAutomatico(null, forcarLoopback);
+    return descobrirEConfigurarAutomatico(null, null, null, forcarLoopback);
+  }
+
+  public static synchronized ConfigCluster descobrirEConfigurarAutomatico(Integer idForcado, boolean forcarLoopback) {
+    return descobrirEConfigurarAutomatico(idForcado, null, null, forcarLoopback);
   }
 
   /**
    * Descobre automaticamente o proprio ID ao entrar na rede com priorizacao inteligente de Shards:
    *
-   * @param idForcado      ID especifico opcional (se null, detecta automaticamente com prioridade S0 -> S1 -> S2 -> Standby).
+   * @param idForcado      ID especifico opcional (1..99).
+   * @param shardForcado   Shard especifico opcional (0=S0, 1=S1, 2=S2).
+   * @param replicaForcada Replica especifica opcional (0=Lider Ativo, 1=Standby).
    * @param forcarLoopback se true anuncia 127.0.0.1 (testes isolados); caso contrario anuncia o IP da LAN.
    */
-  public static synchronized ConfigCluster descobrirEConfigurarAutomatico(Integer idForcado, boolean forcarLoopback) {
+  public static synchronized ConfigCluster descobrirEConfigurarAutomatico(
+      Integer idForcado, Integer shardForcado, Integer replicaForcada, boolean forcarLoopback) {
     String ipLan = BeaconClusterLAN.obterIpLocalLAN();
     String meuHost = forcarLoopback ? "127.0.0.1" : ipLan;
 
     ClusterLog.info("CONFIG:AUTO", "Sondando nos existentes (LAN + localhost) para atribuicao automatica de ID...");
-    Map<Integer, NoInfo> nosRede = BeaconClusterLAN.sondarTodosOsNos(700);
+    Map<Integer, NoInfo> nosRede = BeaconClusterLAN.sondarTodosOsNos(1500);
 
     Set<Integer> ocupados = new TreeSet<>(nosRede.keySet());
     for (int k = 1; k <= PortasShard.MAX_ID; k++) {
@@ -281,6 +297,37 @@ public class ConfigCluster implements Serializable {
         }
       }
       reservaCluster = reserva;
+    } else if (shardForcado != null && shardForcado >= 0 && shardForcado < Particionador.NUM_SHARDS) {
+      // 1. Shard explicitamente solicitado via CLI (ex: --shard 0 [--standby / --replica 1])
+      int repAlvo = (replicaForcada != null && replicaForcada >= 0)
+          ? replicaForcada
+          : (shardsCobertos.contains(shardForcado) ? 1 : 0);
+
+      int candId = PortasShard.idDoNo(shardForcado, repAlvo);
+      // Se a replica alvo ja estiver ocupada localmente, procura a proxima replica livre deste shard
+      if (ocupados.contains(candId) || !isIdTotalmenteDisponivel(candId)) {
+        for (int r = 0; r < PortasShard.MAX_REPLICAS; r++) {
+          int testId = PortasShard.idDoNo(shardForcado, r);
+          if (!ocupados.contains(testId) && isIdTotalmenteDisponivel(testId)) {
+            candId = testId;
+            repAlvo = r;
+            break;
+          }
+        }
+      }
+      idEscolhido = candId;
+      ServerSocket reserva = tentarReservar(PortasShard.clusterDoNo(idEscolhido));
+      if (reservaCluster != null) {
+        try {
+          reservaCluster.close();
+        } catch (Exception ignored) {
+        }
+      }
+      reservaCluster = reserva;
+      ClusterLog.info("CONFIG:CLI", String.format(
+          "[SHARD FORCADO] Shard S%d (%s) | Replica %d -> ID %d (%s)",
+          shardForcado, Particionador.nome(shardForcado), repAlvo, idEscolhido,
+          repAlvo == 0 ? "LIDER ATIVO" : "STANDBY"));
     } else {
       // PRIORIDADE 1: Percorre os shards em ordem estritamente crescente (S0 -> S1 -> S2).
       // Se algum shard AINDA NAO TEM no ativo, ele DEVE ser inicializado com prioridade maxima!

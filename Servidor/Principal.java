@@ -50,23 +50,32 @@ public class Principal {
     ConfigCluster config = null;
 
     Integer idForcado = null;
+    Integer shardForcado = null;
+    Integer replicaForcada = null;
     boolean forcarLoopback = false;
 
     try {
       if (args != null && args.length > 0) {
-        for (String arg : args) {
+        for (int i = 0; i < args.length; i++) {
+          String arg = args[i];
           if ("--local".equalsIgnoreCase(arg) || "--loopback".equalsIgnoreCase(arg)) {
             forcarLoopback = true;
           } else if ("--rede".equalsIgnoreCase(arg) || "--lan".equalsIgnoreCase(arg)) {
             forcarLoopback = false;
+          } else if (("--shard".equalsIgnoreCase(arg) || "-s".equalsIgnoreCase(arg)) && i + 1 < args.length) {
+            shardForcado = Integer.parseInt(args[++i]);
+          } else if ("--standby".equalsIgnoreCase(arg) || "--backup".equalsIgnoreCase(arg)) {
+            replicaForcada = 1;
+          } else if (("--replica".equalsIgnoreCase(arg) || "-r".equalsIgnoreCase(arg)) && i + 1 < args.length) {
+            replicaForcada = Integer.parseInt(args[++i]);
           } else if (ehInteiro(arg)) {
             idForcado = Integer.parseInt(arg);
           }
         }
       }
 
-      // Inicializacao autonoma Zero-Config: descobre o menor ID livre ou usa o pioneiro 1
-      config = ConfigCluster.descobrirEConfigurarAutomatico(idForcado, forcarLoopback);
+      // Inicializacao autonoma com suporte a Zero-Config e argumentos explicitos (--shard, --standby, <ID>)
+      config = ConfigCluster.descobrirEConfigurarAutomatico(idForcado, shardForcado, replicaForcada, forcarLoopback);
 
       // Instala log estruturado com prefixo [SHARD-x | REPLICA-y | PAPEL] e cores ANSI
       LogEstruturado.instalar(config.getIdShard(), config.getIdReplica());
@@ -91,8 +100,7 @@ public class Principal {
         if (novoPar == null || novoPar.idShard != finalConfig.getIdShard()) {
           return;
         }
-        noCluster.getVisao().adicionarParSeAusente(novoPar);
-        noCluster.getCanal().adicionarParSeAusente(novoPar.id, novoPar.host, novoPar.portaCluster);
+        noCluster.notificarNovoParDescoberto(novoPar);
       }
 
       @Override
@@ -114,6 +122,16 @@ public class Principal {
       @Override
       public void onAnuncioShardLAN(int shardRemoto, int idNo, String papel, long epoca, int idLider, String hostRemoto) {
         noCluster.getRoteador().registrarAnuncioExternoLAN(shardRemoto, idNo, papel, epoca, idLider, hostRemoto);
+      }
+
+      @Override
+      public void onAnuncioMesmoShardLAN(int shardRemoto, int replicaRemota, int idNoRemoto, String papelRemoto, long epocaRemota, int idLiderRemoto, String hostRemoto) {
+        noCluster.processarAnuncioMesmoShardLAN(shardRemoto, replicaRemota, idNoRemoto, papelRemoto, epocaRemota, idLiderRemoto, hostRemoto);
+      }
+
+      @Override
+      public void onColisaoIdLAN(int idNo, int idShard, int idReplica, String hostRemoto) {
+        noCluster.processarAnuncioMesmoShardLAN(idShard, idReplica, idNo, "ATIVO", 0L, idNo, hostRemoto);
       }
     });
     beaconShard.iniciar();

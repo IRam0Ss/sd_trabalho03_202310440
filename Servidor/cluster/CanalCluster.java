@@ -10,6 +10,7 @@
 package cluster;
 
 import java.io.EOFException;
+import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.net.InetSocketAddress;
@@ -58,7 +59,7 @@ public class CanalCluster {
     SaidaPar(int id, String host, int porta) {
       this.id = id;
       this.host = host;
-      this.porta = porta;
+      this.porta = PortasShard.clusterDoNo(id);
     }
 
     boolean isConectado() {
@@ -151,8 +152,9 @@ public class CanalCluster {
 
   public void adicionarParSeAusente(int id, String host, int porta) {
     if (id <= 0 || id == config.getMeuId()) return;
+    int portaGarantida = PortasShard.clusterDoNo(id);
     conexoesSaida.computeIfAbsent(id, k -> {
-      SaidaPar saida = new SaidaPar(id, host, porta);
+      SaidaPar saida = new SaidaPar(id, host, portaGarantida);
       new Thread(() -> tentarConectarSaida(saida), "Thread-Cluster-ConectarDinamico-" + id).start();
       return saida;
     });
@@ -162,7 +164,18 @@ public class CanalCluster {
     try {
       Socket s = new Socket();
       s.setTcpNoDelay(true);
-      s.connect(new InetSocketAddress(saida.host, saida.porta), 1000);
+
+      try {
+        s.connect(new InetSocketAddress(saida.host, saida.porta), 800);
+      } catch (IOException exCon) {
+        if (!"127.0.0.1".equals(saida.host)) {
+          s = new Socket();
+          s.setTcpNoDelay(true);
+          s.connect(new InetSocketAddress("127.0.0.1", saida.porta), 800);
+        } else {
+          throw exCon;
+        }
+      }
 
       ObjectOutputStream oos = new ObjectOutputStream(s.getOutputStream());
       oos.flush();
@@ -210,7 +223,7 @@ public class CanalCluster {
       } catch (Exception e) {
         System.err.println("[CLUSTER:TCP] [WARNING] Falha ao enviar para No " + idDestino + ": " + e.getMessage());
         saida.fechar();
-        visao.marcarDown(idDestino);
+        visao.marcarConectado(idDestino, false);
         return false;
       }
     }
@@ -313,11 +326,7 @@ public class CanalCluster {
       } catch (Exception ignored) {
       } finally {
         if (ultimoParId > 0) {
-          visao.marcarDown(ultimoParId);
-          SaidaPar saida = conexoesSaida.get(ultimoParId);
-          if (saida != null) {
-            saida.fechar();
-          }
+          visao.marcarConectado(ultimoParId, false);
         }
         try {
           if (!socket.isClosed()) socket.close();

@@ -195,6 +195,33 @@ public class Servidor {
       }
     }
 
+    // 5b. Portas pioneiras do Shard 0 (TCP 5001 e UDP 6001):
+    // Quando uma replica secundaria do Shard 0 (ex: No 4) assume como lider apos a morte do pioneiro (No 1),
+    // tenta tambem abrir 5001 (TCP) e 6001 (UDP) caso estejam livres, para absorver conexoes e CONFIRMs
+    // de clientes e colegas antes de processarem o SERVER_CHANGED.
+    boolean tcp5001ExtraAberto = false;
+    boolean udp6001ExtraAberto = false;
+    if (idShard == 0) {
+      if (portaTcp != 5001) {
+        try {
+          ServidorTCP tcp5001 = new ServidorTCP(5001, gerenciador, roteador);
+          servicosTCP.add(tcp5001);
+          new Thread(tcp5001, "Thread-ServidorTCP-Pioneiro-5001").start();
+          tcp5001ExtraAberto = true;
+        } catch (Exception ignored) {
+        }
+      }
+      if (portaUdp != 6001) {
+        try {
+          ServidorUDP udp6001 = new ServidorUDP(6001, gerenciador, roteador);
+          servicosUDP.add(udp6001);
+          new Thread(udp6001, "Thread-ServidorUDP-Pioneiro-6001").start();
+          udp6001ExtraAberto = true;
+        } catch (Exception ignored) {
+        }
+      }
+    }
+
     // 6. Discovery universal EDEN na porta UDP 5001: aberto por TODO lider de shard (SO_REUSEADDR),
     //    assim qualquer cliente "burro" encontra algum lider via broadcast mesmo se o Shard 0 cair.
     if (portaDiscovery != Protocolo.PORTA_DISCOVERY_EDEN) {
@@ -217,9 +244,11 @@ public class Servidor {
     imprimirEnderecosLocais();
     System.out.println("TCP escutando em " + portaTcp
         + (tcp6789ExtraAberto ? " (+ interoperavel " + portaTcpColegas + ")" : "")
+        + (tcp5001ExtraAberto ? " (+ pioneiro 5001)" : "")
         + (tcp5000ExtraAberto ? " (+ legado 5000)" : ""));
     System.out.println("UDP escutando em " + portaUdp
         + (udp7777ExtraAberto ? " (+ interoperavel " + portaUdpColegas + ")" : "")
+        + (udp6001ExtraAberto ? " (+ pioneiro 6001)" : "")
         + (udp5000Aberto ? " (+ legado 5000)" : ""));
     System.out.println("Discovery escutando em " + portaDiscovery
         + (discoveryShardAberto ? ", " + portaDiscoveryColegas : "")

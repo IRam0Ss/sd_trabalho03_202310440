@@ -1,0 +1,28 @@
+
+[SISTEMA] Servidor iniciado com sucesso. Digite 'ajuda' para comandos de depuracao.
+
+[CLUSTER:TCP] [INFO] Canal de cluster escutando na porta 9001
+[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 3 (127.0.0.1:9003)
+[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 2 (127.0.0.1:9002)
+[CLUSTER] [INFO] Nenhum lider ativo encontrado. Assumindo lideranca inicial (Nó 1)...
+[SERVIDOR:TCP] [INFO] Escutando na porta 6789
+=== SERVICOS DE ATENDIMENTO ABERTOS (PAPEL: ATIVO) ===
+Interfaces de rede detectadas:
+[SERVIDOR:TCP] [INFO] Escutando na porta 5000
+  -> [wlan0] IPv4: 192.168.15.124
+TCP escutando em 6789
+UDP escutando em 7777
+Discovery escutando em 8888
+======================================================
+[DISCOVERY:5001] Farol UDP ligado na porta 5001 aguardando buscas...
+[DISCOVERY:8888] Farol UDP ligado na porta 8888 aguardando buscas...
+[SERVIDOR:UDP] [INFO] Escutando na porta 7777
+[SERVIDOR:UDP] [INFO] Escutando na porta 5000
+[SERVIDOR:TCP] [INFO] Nova conexao recebida de 127.0.0.1
+[ATENDIMENTO] [INFO] Processando comando REGISTER
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' registrado com sucesso. Total ativos: 1 | Versao: 1
+[ATENDIMENTO] [INFO] Processamento de REGISTER de 'AgenteTeste' concluido.
+[ATENDIMENTO] [INFO] Processando comando JOIN
+[NOTIFICADOR] [INFO] Notificacao UPDATE_USERS disparada para 1 clientes.
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' entrou no grupo 'SALA_SECRETA'. Total: 1 | Versao: 2
+[ATENDIMENTO] [INFO] Processamento de JOIN de 'AgenteTeste' concluido.

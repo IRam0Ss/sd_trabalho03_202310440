@@ -1,0 +1,13 @@
+
+[SISTEMA] Servidor iniciado com sucesso. Digite 'ajuda' para comandos de depuracao.
+
+[CLUSTER:TCP] [INFO] Canal de cluster escutando na porta 9003
+[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 1 (127.0.0.1:9001)
+[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 2 (127.0.0.1:9002)
+[CLUSTER] [INFO] Novo lider anunciado: Nó 1 (Epoca: 0)
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' registrado com sucesso. Total ativos: 1 | Versao: 1
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' entrou no grupo 'SALA_SECRETA'. Total: 1 | Versao: 2
+[ELEICAO] [WARNING] Lider ativo conhecido (Nó 1) caiu ou esta inacessivel.
+[ELEICAO] [WARNING] Disparando eleicao para eleger novo lider...
+[CLUSTER] [INFO] Novo lider anunciado: Nó 2 (Epoca: 1)
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' atualizou sessao (IP: 127.0.0.1 | Porta: 37547). Versao: 3

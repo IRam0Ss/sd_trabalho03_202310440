@@ -1,0 +1,653 @@
+/*****************************************************************
+* Autor..............: Iury Ramos Sodre
+* Matricula..........: 202310440
+* Inicio.............: 15/10/2026
+* Ultima alteracao...: 17/10/2026
+* Nome...............: NoCluster
+* Funcao.............: Orquestrador da maquina de estados do no no cluster, eleicao sem preempcao (D1) e ciclo de vida.
+*************************************************************** */
+
+package cluster;
+
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+
+import controller.GerenciadorGrupos;
+import controller.Operacao;
+import controller.Resultado;
+import model.NotificadorClientes;
+import model.Servidor;
+import utils.Protocolo;
+
+/**
+ * Controla o papel do no (ATIVO, STANDBY, SINCRONIZANDO, CANDIDATO), a eleicao de lideres,
+ * os heartbeats periodicos e a ativacao/desativacao dinamica das portas de atendimento.
+ * 
+ * @author Iury Ramos Sodre (Matricula: 202310440)
+ * @version 1.0
+ */
+public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
+
+  private final ConfigCluster config;
+  private final GerenciadorGrupos gerenciador;
+  private final VisaoCluster visao;
+  private final CanalCluster canal;
+  private final Replicador replicador;
+  private final Servidor servidor;
+  private final RoteadorShards roteador;
+
+  private volatile String papel = "INICIANDO"; // INICIANDO, SINCRONIZANDO, STANDBY, CANDIDATO, ATIVO
+  private volatile long epoca = 0;
+  private volatile int idLiderAtivo = -1;
+  private volatile boolean executando = true;
+
+  // Latch de votacao durante eleicao
+  private CountDownLatch latchVotos;
+  private final AtomicBoolean eleicaoEmAndamento = new AtomicBoolean(false);
+  private final long inicioMs = System.currentTimeMillis();
+
+  public NoCluster(ConfigCluster config, GerenciadorGrupos gerenciador) {
+    this.config = config;
+    this.gerenciador = gerenciador;
+    this.visao = new VisaoCluster(config);
+    this.canal = new CanalCluster(config, visao, this);
+    this.replicador = new Replicador(config.getMeuId(), gerenciador, canal, visao);
+    this.servidor = new Servidor(gerenciador);
+    this.roteador = new RoteadorShards(config, gerenciador, new RoteadorShards.Contexto() {
+      @Override
+      public String papel() {
+        return papel;
+      }
+
+      @Override
+      public int idLiderAtivo() {
+        return idLiderAtivo;
+      }
+
+      @Override
+      public long epoca() {
+        return epoca;
+      }
+    });
+    this.canal.setReceptorInterShard(roteador::receber);
+  }
+
+  public int getMeuId() {
+    return config.getMeuId();
+  }
+
+  public String getPapel() {
+    return papel;
+  }
+
+  public long getEpoca() {
+    return epoca;
+  }
+
+  public int getIdLiderAtivo() {
+    return idLiderAtivo;
+  }
+
+  public GerenciadorGrupos getGerenciador() {
+    return gerenciador;
+  }
+
+  public VisaoCluster getVisao() {
+    return visao;
+  }
+
+  public Replicador getReplicador() {
+    return replicador;
+  }
+
+  public RoteadorShards getRoteador() {
+    return roteador;
+  }
+
+  public CanalCluster getCanal() {
+    return canal;
+  }
+
+  /**
+   * Inicia o canal de cluster, descobre lideres e dispara os temporizadores.
+   */
+  public void iniciar() {
+    canal.iniciar();
+    roteador.iniciar();
+
+    // Loop de heartbeat e liveness (a cada 1000 ms)
+    Thread threadHeartbeat = new Thread(() -> {
+      while (executando) {
+        try {
+          enviarHeartbeat();
+          ClusterLog.heartbeatResumo(config.getNos().size(), visao.getParesVivos().size() + 1, idLiderAtivo);
+
+          boolean ativoCaiu = visao.verificarTimeouts(3000);
+          if (!ativoCaiu && idLiderAtivo > 0 && idLiderAtivo != config.getMeuId()) {
+            VisaoCluster.ParEstado liderSt = visao.getPar(idLiderAtivo);
+            if (liderSt != null && (!liderSt.conectado || "DOWN".equalsIgnoreCase(liderSt.estado))) {
+              ClusterLog.aviso("ELEICAO", "Lider ativo conhecido (No " + idLiderAtivo + ") caiu ou esta inacessivel.");
+              ativoCaiu = true;
+            }
+          }
+
+          if (ativoCaiu && !"ATIVO".equalsIgnoreCase(papel)) {
+            ClusterLog.eleicao("Lider ausente. Disparando eleicao para novo lider...");
+            int antigoLider = this.idLiderAtivo;
+            this.idLiderAtivo = -1;
+            if (antigoLider > 0) {
+              visao.marcarDown(antigoLider);
+            }
+            dispararEleicao();
+          } else if (idLiderAtivo <= 0 && "STANDBY".equalsIgnoreCase(papel)) {
+            dispararEleicao();
+          }
+
+          // Se estiver iniciando e apos timeout nenhum lider foi detectado
+          if ("INICIANDO".equalsIgnoreCase(papel)) {
+            avaliarInicializacao();
+          }
+
+          Thread.sleep(1000);
+        } catch (InterruptedException e) {
+          break;
+        } catch (Exception e) {
+          ClusterLog.erro("CLUSTER", "Falha no loop de heartbeat: " + e.getMessage());
+        }
+      }
+    }, "Thread-NoCluster-Heartbeat");
+    threadHeartbeat.setDaemon(true);
+    threadHeartbeat.start();
+  }
+
+  private void enviarHeartbeat() {
+    MensagemCluster hb = new MensagemCluster(TipoMensagemCluster.HEARTBEAT, config.getMeuId());
+    hb.setEpoca(epoca);
+    hb.setVersao(gerenciador.getVersao());
+    hb.setHash(gerenciador.calcularHash());
+    hb.setEstadoOrigem(papel);
+    hb.setIdAtivoConhecido(idLiderAtivo);
+
+    ConfigCluster.NoInfo info = config.getMeuNoInfo();
+    hb.setHostOrigem(info.host);
+    hb.setPortaClusterOrigem(info.portaCluster);
+    hb.setPortaTcpServico(info.portaTcp);
+    hb.setPortaUdpServico(info.portaUdp);
+
+    canal.broadcast(hb);
+  }
+
+  private void avaliarInicializacao() {
+    long decorrido = System.currentTimeMillis() - inicioMs;
+    // Aguarda pelo menos 1500ms para conexoes do cluster se estabelecerem e heartbeats circularem
+    if (decorrido < 1500) {
+      return;
+    }
+
+    // Verifica se ha algum lider ativo nos pares
+    int ativoConhecido = visao.getIdAtivoAtual();
+    if (ativoConhecido > 0) {
+      ClusterLog.info("CLUSTER", "Lider ativo detectado no No " + ativoConhecido + ". Solicitando sincronizacao...");
+      this.idLiderAtivo = ativoConhecido;
+      this.papel = "SINCRONIZANDO";
+      MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
+      pedido.setVersao(gerenciador.getVersao());
+      canal.enviar(ativoConhecido, pedido);
+    } else {
+      // Se algum no com menor ID existir e estiver conectando/vivo, aguarda por ele ou fica em STANDBY
+      int meuId = config.getMeuId();
+      boolean temMenorIdEsperado = false;
+      for (ConfigCluster.NoInfo outro : config.getOutrosNos()) {
+        if (outro.id < meuId) {
+          VisaoCluster.ParEstado st = visao.getPar(outro.id);
+          // Se o par com menor id estiver conectado ou o tempo decorrido for menor que 3000ms, da prioridade a ele
+          if (st != null && (st.conectado || decorrido < 3000)) {
+            temMenorIdEsperado = true;
+            break;
+          }
+        }
+      }
+
+      if (temMenorIdEsperado) {
+        return; // Aguarda o no de menor ID se apresentar ou assumir
+      }
+
+      ClusterLog.lider("Nenhum lider ativo encontrado na rede. Assumindo lideranca pioneira (No " + meuId + ")...");
+      assumirComoAtivo();
+    }
+  }
+
+  /**
+   * Dispara o processo de eleicao sem preempcao.
+   */
+  public synchronized void dispararEleicao() {
+    if (!eleicaoEmAndamento.compareAndSet(false, true)) {
+      return;
+    }
+
+    new Thread(() -> {
+      try {
+        int meuId = config.getMeuId();
+        // Escalonamento deterministico por ID para evitar tempestades concorrentes de eleicao
+        int delayMs = Math.max(0, (meuId - 1) * 80);
+        if (delayMs > 0) {
+          Thread.sleep(delayMs);
+        }
+
+        // Verifica se algum lider ja foi anunciado durante a espera
+        if (idLiderAtivo > 0 && idLiderAtivo != meuId) {
+          VisaoCluster.ParEstado liderAtual = visao.getPar(idLiderAtivo);
+          if (liderAtual != null && liderAtual.isVivo()) {
+            return;
+          }
+        }
+
+        ClusterLog.eleicao("Avaliando candidatos elegiveis vivos...");
+        List<VisaoCluster.ParEstado> elegiveis = visao.getParesElegiveis();
+
+        long minhaVersao = gerenciador.getVersao();
+        boolean souMelhor = true;
+
+        for (VisaoCluster.ParEstado p : elegiveis) {
+          if (p.id == meuId) continue;
+          if (p.versao > minhaVersao) {
+            souMelhor = false;
+            break;
+          } else if (p.versao == minhaVersao && p.id < meuId) {
+            souMelhor = false;
+            break;
+          }
+        }
+
+        if (souMelhor) {
+          this.papel = "CANDIDATO";
+          this.epoca = Math.max(this.epoca, visao.getMaiorEpocaConhecida()) + 1;
+          ClusterLog.eleicao("Sou o melhor candidato (Versao: " + minhaVersao
+              + ", ID: " + meuId + "). Enviando PROPOSTA na epoca " + epoca + "...");
+
+          List<VisaoCluster.ParEstado> alvos = visao.getParesVivos();
+          alvos.removeIf(p -> p.id == meuId || !p.conectado || "DOWN".equalsIgnoreCase(p.estado));
+
+          if (alvos.isEmpty()) {
+            ClusterLog.lider("Nenhum outro no ativo contactavel (demais nos DOWN). Assumindo lideranca como sobrevivente.");
+            assumirComoAtivo();
+            return;
+          }
+
+          latchVotos = new CountDownLatch(alvos.size());
+          MensagemCluster proposta = new MensagemCluster(TipoMensagemCluster.PROPOSTA, meuId);
+          proposta.setEpoca(epoca);
+          proposta.setVersao(minhaVersao);
+
+          for (VisaoCluster.ParEstado p : alvos) {
+            canal.enviar(p.id, proposta);
+          }
+
+          boolean venceu = latchVotos.await(2000, TimeUnit.MILLISECONDS);
+          if (venceu || latchVotos.getCount() == 0) {
+            if ("CANDIDATO".equalsIgnoreCase(this.papel)) {
+              ClusterLog.lider("Votos obtidos da maioria dos pares! Assumindo lideranca ativa do cluster.");
+              assumirComoAtivo();
+            }
+          } else {
+            ClusterLog.aviso("ELEICAO", "Timeout de votacao. Voltando para STANDBY.");
+            if ("CANDIDATO".equalsIgnoreCase(this.papel)) {
+              this.papel = "STANDBY";
+            }
+          }
+        } else {
+          ClusterLog.standby("Outro no tem maior prioridade para lideranca. Aguardando anuncio de COORDENADOR...");
+          this.papel = "STANDBY";
+        }
+      } catch (Exception e) {
+        ClusterLog.erro("ELEICAO", "Falha no processo de eleicao: " + e.getMessage());
+      } finally {
+        eleicaoEmAndamento.set(false);
+      }
+    }, "Thread-Eleicao").start();
+  }
+
+  /**
+   * Promove o no para ATIVO: abre portas de atendimento e notifica os clientes.
+   */
+  public synchronized void assumirComoAtivo() {
+    this.papel = "ATIVO";
+    this.idLiderAtivo = config.getMeuId();
+
+    ConfigCluster.NoInfo info = config.getMeuNoInfo();
+    // Apenas Shard 0 / Replica 0 (TCP 5000) cuida do legado, evitando disputa entre shards
+    boolean incluirLegado = (config.getIdShard() == 0 && config.getMeuId() == 1);
+    servidor.iniciarServicos(info.portaTcp, info.portaUdp, info.portaDiscovery, incluirLegado, config.getMeuId());
+
+    ClusterLog.lider(String.format("No %d assumiu coordenacao do cluster (Epoca: %d, Versao: %d, Hash: %s)",
+        config.getMeuId(), epoca, gerenciador.getVersao(), gerenciador.calcularHash()));
+
+    // Envia COORDENADOR para todos os pares
+    MensagemCluster coord = new MensagemCluster(TipoMensagemCluster.COORDENADOR, config.getMeuId());
+    coord.setEpoca(epoca);
+    coord.setVersao(gerenciador.getVersao());
+    coord.setPortaTcpServico(info.portaTcp);
+    coord.setPortaUdpServico(info.portaUdp);
+    canal.broadcast(coord);
+
+    // Dispara notificacao SERVER_CHANGED para todos os clientes registrados
+    NotificadorClientes.notificarServerChanged(
+        gerenciador.getTodosUsuariosAtivos(),
+        info.host,
+        info.portaTcp,
+        info.portaUdp,
+        epoca,
+        config.getMeuId()
+    );
+
+    // Conecta replicacao sincrona para todas as operacoes recebidas dos clientes (D2)
+    gerenciador.setListenerReplicacao(op -> replicador.executar(op, this.epoca));
+  }
+
+  /**
+   * Rebaixa o no para STANDBY: fecha portas de servico e redireciona clientes se necessario.
+   */
+  public synchronized void rebaixarParaStandby(int novoLider, long novaEpoca) {
+    gerenciador.setListenerReplicacao(null);
+    if ("ATIVO".equalsIgnoreCase(this.papel)) {
+      ClusterLog.aviso("CLUSTER", "Rebaixando de ATIVO para STANDBY. Novo lider: No " + novoLider);
+      ConfigCluster.NoInfo infoNovoLider = config.getNos().get(novoLider);
+      if (infoNovoLider != null) {
+        NotificadorClientes.notificarServerChanged(
+            gerenciador.getTodosUsuariosAtivos(),
+            infoNovoLider.host,
+            infoNovoLider.portaTcp,
+            infoNovoLider.portaUdp,
+            novaEpoca,
+            novoLider
+        );
+      }
+      servidor.pararServicos();
+    }
+    this.papel = "STANDBY";
+    this.idLiderAtivo = novoLider;
+    this.epoca = Math.max(this.epoca, novaEpoca);
+  }
+
+  /**
+   * Resolve deterministica e simetricamente conflito de lideranca (dois nos operando como ATIVO).
+   * Hierarquia estrita: Versao dos Dados > Epoca > Menor ID.
+   */
+  private synchronized void resolverConflitoLideranca(MensagemCluster msg) {
+    int parId = msg.getIdOrigem();
+    long minhaVersao = gerenciador.getVersao();
+    long versaoPar = msg.getVersao();
+    long parEpoca = msg.getEpoca();
+
+    ClusterLog.conflito(String.format(
+        "Dois nos operando como ATIVO! Local: [ID %d, Versao=%d, Epoca=%d] vs Remoto: [No %d, Versao=%d, Epoca=%d]",
+        config.getMeuId(), minhaVersao, this.epoca, parId, versaoPar, parEpoca));
+
+    boolean euVenci;
+    // CRITERIO 1: Versao dos dados (Historico de operacoes persistidas)
+    if (minhaVersao > versaoPar) {
+      euVenci = true;
+    } else if (minhaVersao < versaoPar) {
+      euVenci = false;
+    } else {
+      // CRITERIO 2: Epoca
+      if (this.epoca > parEpoca) {
+        euVenci = true;
+      } else if (this.epoca < parEpoca) {
+        euVenci = false;
+      } else {
+        // CRITERIO 3: Desempate deterministico por menor ID
+        euVenci = (config.getMeuId() < parId);
+      }
+    }
+
+    if (euVenci) {
+      ClusterLog.cura(String.format("No %d prevalece como Lider ATIVO. Impondo coordenacao ao No %d.",
+          config.getMeuId(), parId));
+      this.epoca = Math.max(this.epoca, parEpoca) + 1;
+      ConfigCluster.NoInfo info = config.getMeuNoInfo();
+      MensagemCluster coord = new MensagemCluster(TipoMensagemCluster.COORDENADOR, config.getMeuId());
+      coord.setEpoca(this.epoca);
+      coord.setVersao(minhaVersao);
+      coord.setPortaTcpServico(info.portaTcp);
+      coord.setPortaUdpServico(info.portaUdp);
+      canal.broadcast(coord);
+    } else {
+      ClusterLog.cura(String.format("No %d cede lideranca ao No %d (vencedor). Rebaixando para STANDBY e sincronizando snapshot.",
+          config.getMeuId(), parId));
+      rebaixarParaStandby(parId, Math.max(this.epoca, parEpoca));
+      this.papel = "SINCRONIZANDO";
+      MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
+      pedido.setVersao(gerenciador.getVersao());
+      canal.enviar(parId, pedido);
+    }
+  }
+
+  // =========================================================================
+  // PROCESSAMENTO DE MENSAGENS RECEBIDAS DO CLUSTER
+  // =========================================================================
+
+  @Override
+  public void onMensagemRecebida(MensagemCluster msg) {
+    if (msg == null) return;
+
+    // Defesa em profundidade: o consenso (eleicao/replicacao/heartbeat) e estritamente intra-shard
+    if (msg.getIdShard() >= 0 && msg.getIdShard() != config.getIdShard()) {
+      return;
+    }
+
+    // Garante que novos nos descobertos dinamicamente sejam registrados
+    if (msg.getIdOrigem() > 0 && msg.getIdOrigem() != config.getMeuId()) {
+      String hostOrig = (msg.getHostOrigem() != null && !msg.getHostOrigem().isEmpty()) ? msg.getHostOrigem() : "127.0.0.1";
+      int idxRep = msg.getIdOrigem() - 1;
+      int pCluster = (msg.getPortaClusterOrigem() > 0) ? msg.getPortaClusterOrigem() : PortasShard.cluster(config.getIdShard(), idxRep);
+      int pTcp = (msg.getPortaTcpServico() > 0) ? msg.getPortaTcpServico() : PortasShard.tcp(config.getIdShard(), idxRep);
+      int pUdp = (msg.getPortaUdpServico() > 0) ? msg.getPortaUdpServico() : PortasShard.udp(config.getIdShard(), idxRep);
+
+      ConfigCluster.NoInfo infoPar = new ConfigCluster.NoInfo(
+          msg.getIdOrigem(), config.getIdShard(), idxRep, hostOrig, pCluster, pTcp, pUdp, Protocolo.PORTA_DISCOVERY
+      );
+      config.registrarParDinamico(infoPar);
+      visao.adicionarParSeAusente(infoPar);
+      canal.adicionarParSeAusente(msg.getIdOrigem(), hostOrig, pCluster);
+    }
+
+    // Atualiza status do par
+    visao.atualizarHeartbeat(
+        msg.getIdOrigem(),
+        msg.getEstadoOrigem() != null ? msg.getEstadoOrigem() : "STANDBY",
+        msg.getEpoca(),
+        msg.getVersao(),
+        msg.getHash(),
+        msg.getPortaTcpServico(),
+        msg.getPortaUdpServico()
+    );
+
+    // Se receber qualquer mensagem com epoca maior, verifica se ha conflito de lideres ativos ou atualiza epoca
+    if (msg.getEpoca() > this.epoca) {
+      if ("ATIVO".equalsIgnoreCase(this.papel) && "ATIVO".equalsIgnoreCase(msg.getEstadoOrigem()) && msg.getIdOrigem() != config.getMeuId()) {
+        resolverConflitoLideranca(msg);
+      } else if (!"ATIVO".equalsIgnoreCase(this.papel)) {
+        this.epoca = msg.getEpoca();
+      }
+    }
+
+    switch (msg.getTipo()) {
+      case HELLO:
+      case HEARTBEAT:
+        if ("ATIVO".equalsIgnoreCase(msg.getEstadoOrigem())) {
+          if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
+            resolverConflitoLideranca(msg);
+          } else {
+            this.idLiderAtivo = msg.getIdOrigem();
+            this.epoca = Math.max(this.epoca, msg.getEpoca());
+            if ("INICIANDO".equalsIgnoreCase(this.papel)) {
+              this.papel = "SINCRONIZANDO";
+              MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
+              pedido.setVersao(gerenciador.getVersao());
+              canal.enviar(msg.getIdOrigem(), pedido);
+            }
+          }
+        }
+        break;
+
+      case REPLICAR:
+        if (!"ATIVO".equalsIgnoreCase(this.papel)) {
+          replicador.processarReplicacaoRecebida(msg);
+        }
+        break;
+
+      case ACK:
+        if ("ATIVO".equalsIgnoreCase(this.papel)) {
+          replicador.processarAck(msg.getIdOrigem(), msg.getVersao());
+        }
+        break;
+
+      case PEDIDO_SYNC:
+        if ("ATIVO".equalsIgnoreCase(this.papel)) {
+          replicador.enviarSnapshot(msg.getIdOrigem(), epoca);
+        }
+        break;
+
+      case SNAPSHOT:
+        if (!"ATIVO".equalsIgnoreCase(this.papel)) {
+          if (msg.getPayload() instanceof byte[]) {
+            byte[] dados = (byte[]) msg.getPayload();
+            replicador.instalarSnapshot(dados, msg.getEpoca(), msg.getVersao());
+            this.epoca = msg.getEpoca();
+            this.papel = "STANDBY"; // No sincronizado entra como STANDBY (D1)
+            this.idLiderAtivo = msg.getIdOrigem();
+
+            MensagemCluster ok = new MensagemCluster(TipoMensagemCluster.SYNC_OK, config.getMeuId());
+            ok.setVersao(gerenciador.getVersao());
+            canal.enviar(msg.getIdOrigem(), ok);
+            ClusterLog.standby("Sincronizacao concluida com sucesso. No operando em STANDBY.");
+          }
+        }
+        break;
+
+      case SYNC_OK:
+        ClusterLog.info("CLUSTER", "No " + msg.getIdOrigem() + " sincronizou com sucesso e esta em STANDBY.");
+        break;
+
+      case PROPOSTA:
+        tratarProposta(msg);
+        break;
+
+      case VOTO:
+        if (latchVotos != null && msg.getEpoca() == this.epoca) {
+          if (Boolean.TRUE.equals(msg.getPayload())) {
+            latchVotos.countDown();
+          }
+        }
+        break;
+
+      case COORDENADOR:
+        if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
+          resolverConflitoLideranca(msg);
+        } else if (msg.getEpoca() >= this.epoca) {
+          ClusterLog.lider("Novo lider anunciado: No " + msg.getIdOrigem() + " (Epoca: " + msg.getEpoca() + ", Versao: " + msg.getVersao() + ")");
+          this.idLiderAtivo = msg.getIdOrigem();
+          this.epoca = msg.getEpoca();
+          if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getIdOrigem() != config.getMeuId()) {
+            rebaixarParaStandby(msg.getIdOrigem(), msg.getEpoca());
+          } else if (!"ATIVO".equalsIgnoreCase(this.papel)) {
+            this.papel = "STANDBY";
+            if (gerenciador.getVersao() < msg.getVersao()) {
+              ClusterLog.info("CLUSTER", "Versao local (" + gerenciador.getVersao() + ") defasada em relacao ao lider (" + msg.getVersao() + "). Solicitando SNAPSHOT...");
+              this.papel = "SINCRONIZANDO";
+              MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
+              pedido.setVersao(gerenciador.getVersao());
+              canal.enviar(msg.getIdOrigem(), pedido);
+            }
+          }
+        } else {
+          ClusterLog.aviso("CLUSTER", "Ignorando COORDENADOR obsoleto do No " + msg.getIdOrigem()
+              + " (Epoca " + msg.getEpoca() + " < Minha " + this.epoca + ")");
+        }
+        break;
+
+      case RENUNCIA:
+        ClusterLog.info("CLUSTER", "Lider No " + msg.getIdOrigem() + " renunciou graciosamente. Disparando eleicao imediata.");
+        visao.marcarDown(msg.getIdOrigem());
+        this.idLiderAtivo = -1;
+        dispararEleicao();
+        break;
+
+      case SAINDO:
+        ClusterLog.info("CLUSTER", "No " + msg.getIdOrigem() + " anunciou saida do cluster.");
+        visao.marcarDown(msg.getIdOrigem());
+        if (msg.getIdOrigem() == this.idLiderAtivo) {
+          ClusterLog.eleicao("Lider ativo No " + msg.getIdOrigem() + " saindo do cluster. Disparando eleicao imediata!");
+          this.idLiderAtivo = -1;
+          dispararEleicao();
+        }
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  private synchronized void tratarProposta(MensagemCluster msg) {
+    MensagemCluster voto = new MensagemCluster(TipoMensagemCluster.VOTO, config.getMeuId());
+    voto.setEpoca(msg.getEpoca());
+
+    long minhaVersao = gerenciador.getVersao();
+    int meuId = config.getMeuId();
+
+    boolean aceita = true;
+
+    // 1. Proposta com epoca desatualizada: rejeitada
+    if (msg.getEpoca() < this.epoca) {
+      aceita = false;
+    }
+    // 2. Se ja sou ATIVO e a proposta nao tem epoca estritamente maior: rejeitada
+    else if ("ATIVO".equalsIgnoreCase(this.papel) && msg.getEpoca() <= this.epoca) {
+      aceita = false;
+    }
+    // 3. Se os dados do candidato forem mais antigos que os meus: rejeitada
+    else if (msg.getVersao() < minhaVersao) {
+      aceita = false;
+    }
+    // 4. Se a versao for igual: desempate por menor ID
+    else if (msg.getVersao() == minhaVersao) {
+      if (msg.getIdOrigem() > meuId && ("CANDIDATO".equalsIgnoreCase(this.papel) || "ATIVO".equalsIgnoreCase(this.papel))) {
+        aceita = false;
+      }
+    }
+
+    if (aceita) {
+      this.epoca = Math.max(this.epoca, msg.getEpoca());
+      if ("ATIVO".equalsIgnoreCase(this.papel)) {
+        rebaixarParaStandby(msg.getIdOrigem(), msg.getEpoca());
+      } else if ("CANDIDATO".equalsIgnoreCase(this.papel)) {
+        this.papel = "STANDBY";
+      }
+    }
+
+    voto.setPayload(aceita);
+    canal.enviar(msg.getIdOrigem(), voto);
+  }
+
+  /**
+   * Encerramento gracioso do no com aviso imediato aos pares (RENUNCIA / SAINDO).
+   */
+  public void encerrar() {
+    this.executando = false;
+    roteador.parar();
+    if ("ATIVO".equalsIgnoreCase(this.papel)) {
+      ClusterLog.info("CLUSTER", "Enviando RENUNCIA aos pares antes de encerrar...");
+      MensagemCluster renuncia = new MensagemCluster(TipoMensagemCluster.RENUNCIA, config.getMeuId());
+      canal.broadcast(renuncia);
+      servidor.pararServicos();
+    } else {
+      MensagemCluster saindo = new MensagemCluster(TipoMensagemCluster.SAINDO, config.getMeuId());
+      canal.broadcast(saindo);
+    }
+    canal.fechar();
+    ClusterLog.info("CLUSTER", "No " + config.getMeuId() + " encerrado com sucesso.");
+  }
+}

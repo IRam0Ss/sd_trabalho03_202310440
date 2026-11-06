@@ -1,0 +1,14 @@
+# ==============================================================================
+# E.D.E.N - Configuracao de Topologia de Cluster de Servidores (Redundancia)
+# ==============================================================================
+# Cada linha define um nó do cluster no formato:
+# no.<ID>=<IP_DO_HOST> ; cluster=<PORTA_CLUSTER> ; tcp=<PORTA_TCP> ; udp=<PORTA_UDP> ; discovery=<PORTA_DISCOVERY>
+#
+# Para executar um nó específico utilizando este arquivo:
+#   java -cp Servidor/bin Principal <SEU_ID> cluster.properties
+# ==============================================================================
+
+no.1=192.168.1.101 ; cluster=9001 ; tcp=6789 ; udp=7777 ; discovery=8888
+no.2=192.168.1.102 ; cluster=9002 ; tcp=6789 ; udp=7777 ; discovery=8888
+no.3=192.168.1.103 ; cluster=9003 ; tcp=6789 ; udp=7777 ; discovery=8888
+

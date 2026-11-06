@@ -1,0 +1,35 @@
+
+[SISTEMA] Servidor iniciado com sucesso. Digite 'ajuda' para comandos de depuracao.
+
+[CLUSTER:TCP] [INFO] Canal de cluster escutando na porta 9002
+[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 1 (127.0.0.1:9001)
+[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o Nó 3 (127.0.0.1:9003)
+[CLUSTER] [INFO] Novo lider anunciado: Nó 1 (Epoca: 0)
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' registrado com sucesso. Total ativos: 1 | Versao: 1
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' entrou no grupo 'SALA_SECRETA'. Total: 1 | Versao: 2
+[ELEICAO] [WARNING] Lider ativo conhecido (Nó 1) caiu ou esta inacessivel.
+[ELEICAO] [WARNING] Disparando eleicao para eleger novo lider...
+[ELEICAO] [INFO] Avaliando candidatos elegiveis vivos...
+[ELEICAO] [INFO] Sou o melhor candidato (Versao: 2, ID: 2). Enviando PROPOSTA na epoca 1...
+[ELEICAO] [INFO] Votos obtidos com sucesso! Assumindo lideranca.
+[SERVIDOR:TCP] [INFO] Escutando na porta 6799
+=== SERVICOS DE ATENDIMENTO ABERTOS (PAPEL: ATIVO) ===
+Interfaces de rede detectadas:
+  -> [wlan0] IPv4: 192.168.15.124
+TCP escutando em 6799
+UDP escutando em 7787
+Discovery escutando em 8888
+======================================================
+[SERVIDOR:UDP] [INFO] Escutando na porta 7787
+[DISCOVERY:8888] Farol UDP ligado na porta 8888 aguardando buscas...
+[NOTIFICADOR] [INFO] Notificacao SERVER_CHANGED disparada para 1 clientes.
+[SERVIDOR:TCP] [INFO] Nova conexao recebida de 127.0.0.1
+[SERVIDOR:TCP] [INFO] Nova conexao recebida de 127.0.0.1
+[LIVENESS:PING] Heartbeats PING de clientes ativos sendo atendidos normalmente (Total: 1)
+[ATENDIMENTO] [INFO] Processando comando REGISTER
+[GERENCIADOR] [INFO] Usuario 'AgenteTeste' atualizou sessao (IP: 127.0.0.1 | Porta: 37547). Versao: 3
+[ATENDIMENTO] [INFO] Processamento de REGISTER de 'AgenteTeste' concluido.
+[ATENDIMENTO] [INFO] Processando comando LIST
+[ATENDIMENTO] [INFO] Processamento de LIST concluido.
+[ATENDIMENTO] [INFO] Processando comando MEMBERS
+[ATENDIMENTO] [INFO] Processamento de MEMBERS concluido para grupo: SALA_SECRETA

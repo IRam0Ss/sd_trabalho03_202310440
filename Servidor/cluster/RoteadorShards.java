@@ -31,6 +31,7 @@ import java.util.concurrent.TimeUnit;
 
 import Protocol.APDU;
 import cluster.MensagensShard.AnuncioShard;
+import cluster.MensagensShard.InvalidaSessaoCliente;
 import cluster.MensagensShard.PacoteUdpRoteado;
 import cluster.MensagensShard.PedidoConsulta;
 import cluster.MensagensShard.PedidoRoteado;
@@ -38,6 +39,7 @@ import cluster.MensagensShard.RespostaConsulta;
 import cluster.MensagensShard.RespostaRoteada;
 import cluster.MensagensShard.Status;
 import cluster.MensagensShard.TipoConsulta;
+import controller.AtendimentoCliente;
 import controller.GerenciadorGrupos;
 import controller.Operacao;
 import controller.Resultado;
@@ -115,6 +117,15 @@ public class RoteadorShards {
         @Override
         protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
           return size() > 2000;
+        }
+      }));
+  private final Set<String> invalidacoesVistas = Collections.synchronizedSet(
+      Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(256, 0.75f, true) {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+          return size() > 1000;
         }
       }));
 
@@ -333,6 +344,12 @@ public class RoteadorShards {
           pool.submit(() -> tratarPacoteUdpRoteado(pkt));
         }
         break;
+      case INVALIDAR_SESSAO_CLIENTE:
+        if (msg.getPayload() instanceof InvalidaSessaoCliente) {
+          final InvalidaSessaoCliente inv = (InvalidaSessaoCliente) msg.getPayload();
+          pool.submit(() -> tratarInvalidacaoSessao(inv));
+        }
+        break;
       default:
         break;
     }
@@ -521,6 +538,28 @@ public class RoteadorShards {
     }
   }
 
+  private RespostaConsulta avaliarSessaoLocal(String idCorrelacao, String nomeUsuario, List<String> gruposEsperados) {
+    boolean valida = true;
+    String motivo = null;
+    if (nomeUsuario != null && !nomeUsuario.trim().isEmpty()) {
+      if (Particionador.pertence(nomeUsuario, meuShard) && gerenciador.buscarUsuarioPorNome(nomeUsuario) == null) {
+        valida = false;
+        motivo = "Usuario '" + nomeUsuario + "' desconhecido na memoria do " + Particionador.nome(meuShard);
+      }
+      if (valida && gruposEsperados != null) {
+        for (String g : gruposEsperados) {
+          if (g != null && Particionador.pertence(g, meuShard) && !gerenciador.isMembroGrupo(g, nomeUsuario)) {
+            valida = false;
+            motivo = "Usuario '" + nomeUsuario + "' ausente do grupo '" + g + "' na memoria do "
+                + Particionador.nome(meuShard);
+            break;
+          }
+        }
+      }
+    }
+    return new RespostaConsulta(idCorrelacao, Status.OK, config.getMeuId(), null, null, null, valida, motivo);
+  }
+
   private void tratarConsulta(PedidoConsulta pc) {
     RespostaConsulta resp;
     if (pc == null || pc.shardDestino != meuShard) {
@@ -531,6 +570,8 @@ public class RoteadorShards {
       boolean conhece = lider > 0 && lider != config.getMeuId();
       resp = new RespostaConsulta(pc.idCorrelacao, conhece ? Status.REDIRECIONAR : Status.NAO_ATIVO,
           conhece ? lider : -1, null, null, null);
+    } else if (pc.tipo == TipoConsulta.VERIFICAR_SESSAO_USUARIO) {
+      resp = avaliarSessaoLocal(pc.idCorrelacao, pc.parametro, pc.gruposEsperados);
     } else {
       ArrayList<String> grupos = null;
       ArrayList<InfoUser> usuarios = null;
@@ -557,10 +598,18 @@ public class RoteadorShards {
    * Retorna null se a particao estiver inacessivel dentro do prazo.
    */
   public RespostaConsulta consultarShard(int shardDestino, TipoConsulta tipo, String parametro, long timeoutMs) {
+    return consultarShard(shardDestino, tipo, parametro, null, timeoutMs);
+  }
+
+  public RespostaConsulta consultarShard(int shardDestino, TipoConsulta tipo, String parametro,
+      ArrayList<String> gruposEsperados, long timeoutMs) {
     Particionador.validarShard(shardDestino);
 
     // Atalho zero-hop se este proprio no for o lider ATIVO do shard consultado
     if (shardDestino == meuShard && "ATIVO".equalsIgnoreCase(ctx.papel())) {
+      if (tipo == TipoConsulta.VERIFICAR_SESSAO_USUARIO) {
+        return avaliarSessaoLocal("local", parametro, gruposEsperados);
+      }
       ArrayList<String> grupos = null;
       ArrayList<InfoUser> usuarios = null;
       if (tipo == TipoConsulta.LISTAR_GRUPOS) {
@@ -576,10 +625,11 @@ public class RoteadorShards {
     final String corr = UUID.randomUUID().toString();
     final long limite = System.currentTimeMillis() + timeoutMs;
     final Set<Integer> tentados = new HashSet<>();
+    final int maxRodadasFalha = (timeoutMs <= 700) ? 1 : 2;
     int rodadasConexaoFalha = 0;
     boolean algumNoVivo = false;
 
-    final PedidoConsulta pedido = new PedidoConsulta(corr, shardDestino, tipo, parametro,
+    final PedidoConsulta pedido = new PedidoConsulta(corr, shardDestino, tipo, parametro, gruposEsperados,
         host, config.getMeuNoInfo().portaCluster, meuShard, config.getMeuId());
 
     try {
@@ -591,8 +641,8 @@ public class RoteadorShards {
         if (alvo <= 0) {
           if (!algumNoVivo) {
             rodadasConexaoFalha++;
-            // Se TODAS as replicas do shard recusaram conexao TCP em 2 varreduras, o shard esta offline (fail-fast)
-            if (rodadasConexaoFalha >= 2) {
+            // Se TODAS as replicas do shard recusaram conexao TCP, o shard esta offline (fail-fast)
+            if (rodadasConexaoFalha >= maxRodadasFalha) {
               break;
             }
           }
@@ -918,6 +968,114 @@ public class RoteadorShards {
         PacoteUdpRoteado repasse = new PacoteUdpRoteado(
             pkt.idPacote, pkt.shardDestino, pkt.apdu, pkt.ipCliente, pkt.portaUdpCliente, pkt.saltos + 1);
         enviar(meuShard, lider, criarMsg(TipoMensagemCluster.ENCAMINHAR_UDP, repasse));
+      }
+    }
+  }
+
+  // =========================================================================
+  // FASE 6: DETECCAO DE AMNESIA DE SHARD E INVALIDACAO DE SOCKET NO GATEWAY
+  // =========================================================================
+
+  /**
+   * Verifica se os shards responsaveis pelo cadastro do usuario (Home Shard) e pelos grupos ativos
+   * desta sessao ainda possuem o estado do cliente em memoria.
+   * <ul>
+   *   <li>Se um shard estiver OFFLINE (inalcancavel), retorna {@code null} (preserva disponibilidade parcial CAP).</li>
+   *   <li>Se um shard estiver ONLINE ({@code Status.OK}) mas tiver reiniciado sem o usuario/grupo na memoria
+   *       (amnesia volátil), retorna o motivo do erro para que o gateway derrube o socket TCP do cliente.</li>
+   * </ul>
+   */
+  public String verificarAmnesiaSessao(String nomeUsuario, Set<String> gruposAtivosSessao) {
+    if (!executando || nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
+      return null;
+    }
+    String nomeTrim = nomeUsuario.trim();
+    Map<Integer, ArrayList<String>> gruposPorShard = new LinkedHashMap<>();
+    int shardHome = Particionador.shardDe(nomeTrim);
+    gruposPorShard.put(shardHome, new ArrayList<>());
+
+    if (gruposAtivosSessao != null) {
+      for (String g : gruposAtivosSessao) {
+        if (g == null || g.trim().isEmpty()) continue;
+        int sg = Particionador.shardDe(g);
+        gruposPorShard.computeIfAbsent(sg, k -> new ArrayList<>()).add(g);
+      }
+    }
+
+    for (Map.Entry<Integer, ArrayList<String>> entry : gruposPorShard.entrySet()) {
+      int shardAlvo = entry.getKey();
+      ArrayList<String> gruposNoShard = entry.getValue();
+      RespostaConsulta rc = consultarShard(
+          shardAlvo, TipoConsulta.VERIFICAR_SESSAO_USUARIO, nomeTrim, gruposNoShard, 550);
+      if (rc != null && rc.status == Status.OK && !rc.sessaoValida) {
+        return (rc.motivoInvalidez != null)
+            ? rc.motivoInvalidez
+            : ("Estado de '" + nomeTrim + "' ausente na memoria do " + Particionador.nome(shardAlvo));
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Valida assincronamente se o remetente de um comando UDP (ex.: SENDPVT) ainda consta na memoria
+   * do seu Home Shard; caso o Home Shard esteja online e tenha sofrido amnesia, derruba o TCP no gateway.
+   */
+  public void validarCadastroRemetenteAssincrono(String nomeUsuario) {
+    if (!executando || nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
+      return;
+    }
+    final String nomeTrim = nomeUsuario.trim();
+    pool.submit(() -> {
+      String erroAmnesia = verificarAmnesiaSessao(nomeTrim, Collections.emptySet());
+      if (erroAmnesia != null) {
+        invalidarSessaoClienteGlobal(nomeTrim, erroAmnesia);
+      }
+    });
+  }
+
+  /**
+   * Notifica todos os shards (e executa localmente) o fechamento imediato do socket TCP do cliente
+   * cujo estado volátil desapareceu apos reinicio total de um shard, forcando Failover + Re-REGISTER/Re-JOIN.
+   */
+  public void invalidarSessaoClienteGlobal(String nomeUsuario, String motivo) {
+    if (!executando || nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
+      return;
+    }
+    final String nomeTrim = nomeUsuario.trim();
+    final String idEvento = UUID.randomUUID().toString();
+    final InvalidaSessaoCliente payload = new InvalidaSessaoCliente(idEvento, nomeTrim, motivo, meuShard);
+
+    tratarInvalidacaoSessao(payload);
+
+    pool.submit(() -> {
+      MensagemCluster msg = criarMsg(TipoMensagemCluster.INVALIDAR_SESSAO_CLIENTE, payload);
+      for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+        if (s == meuShard) continue;
+        int lider = tabela.getLider(s);
+        if (lider > 0 && enviar(s, lider, msg)) {
+          continue;
+        }
+        for (int r = 0; r < totalReplicas; r++) {
+          enviar(s, r + 1, msg);
+        }
+      }
+    });
+  }
+
+  private void tratarInvalidacaoSessao(InvalidaSessaoCliente inv) {
+    if (inv == null || inv.nomeUsuario == null || !executando) {
+      return;
+    }
+    if (inv.idEvento != null && !invalidacoesVistas.add(inv.idEvento)) {
+      return;
+    }
+    Object sessao = gerenciador.obterSessaoAtiva(inv.nomeUsuario);
+    if (sessao instanceof AtendimentoCliente) {
+      ((AtendimentoCliente) sessao).forcarQuedaPorAmnesiaShard(inv.motivo);
+    } else if (!"ATIVO".equalsIgnoreCase(ctx.papel())) {
+      int lider = ctx.idLiderAtivo();
+      if (lider > 0 && lider != config.getMeuId()) {
+        enviar(meuShard, lider, criarMsg(TipoMensagemCluster.INVALIDAR_SESSAO_CLIENTE, inv));
       }
     }
   }

@@ -44,6 +44,8 @@ public enum TipoMensagemCluster implements Serializable {
   /** Fase 4: resposta de consulta read-only entre shards. */
   RESP_CONSULTA_SHARD,
   /** Fase 5: encaminhamento de APDU UDP (SEND, SENDVU, SENDPVT, CONFIRM) ao lider do shard responsavel. */
-  ENCAMINHAR_UDP
+  ENCAMINHAR_UDP,
+  /** Fase 6: notifica o no de entrada para fechar o socket TCP de um cliente apos amnesia de shard. */
+  INVALIDAR_SESSAO_CLIENTE
 }
 

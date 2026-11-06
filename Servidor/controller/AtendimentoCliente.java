@@ -17,7 +17,9 @@ import java.net.Socket;
 import java.net.SocketException;
 import java.util.Collection;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import Protocol.APDU;
@@ -47,6 +49,9 @@ public class AtendimentoCliente implements Runnable {
   private InfoUser usuarioAssociado = null;
   private ObjectOutputStream saidaObjetos;
   private final AtomicBoolean faxinaExecutada = new AtomicBoolean(false);
+  /** Grupos em que o cliente ingressou nesta sessao TCP, usados para detectar amnesia caso um shard reinicie. */
+  private final Set<String> gruposDaSessao = ConcurrentHashMap.newKeySet();
+  private volatile long ultimoRegistroOuJoinMs = 0L;
 
   private static final java.util.concurrent.atomic.AtomicLong totalPingsAtendidos = new java.util.concurrent.atomic.AtomicLong(0);
   private static volatile long ultimoLogPing = 0;
@@ -174,6 +179,46 @@ public class AtendimentoCliente implements Runnable {
   }
 
   /**
+   * Fecha imediatamente o socket TCP deste cliente no no de entrada quando um shard de destino
+   * reiniciou sem o estado volátil do usuario/grupo (Amnesia de Shard).
+   * Nao dispara faxina de cliente fantasma nos demais shards saudaveis, permitindo que o cliente
+   * entre em Failover automatico e reenvie REGISTER e JOIN para reconstruir a memoria perdida.
+   */
+  public void forcarQuedaPorAmnesiaShard(String motivo) {
+    if (!faxinaExecutada.compareAndSet(false, true)) {
+      return;
+    }
+    String nome = (this.usuarioAssociado != null && this.usuarioAssociado.getNome() != null)
+        ? this.usuarioAssociado.getNome()
+        : "desconhecido";
+    this.gerenciador.desvincularSessao(nome, this);
+    ClusterLog.aviso("AMNESIA-SHARD", String.format(
+        "Shard de destino retornou sessao/usuario desconhecido para '%s' (%s). "
+            + "Fechando socket TCP de entrada para forcar Failover + Re-REGISTER/Re-JOIN!",
+        nome, motivo));
+    fecharSocketSilencioso();
+  }
+
+  /**
+   * Valida se algum shard online perdeu o estado volátil deste cliente; caso afirmativo,
+   * encerra o socket TCP imediatamente e retorna true.
+   */
+  private boolean verificarEDerrubarSeAmnesia() {
+    if (this.roteador == null || this.usuarioAssociado == null || this.usuarioAssociado.getNome() == null) {
+      return false;
+    }
+    if (System.currentTimeMillis() - this.ultimoRegistroOuJoinMs < 1200) {
+      return false;
+    }
+    String erroAmnesia = this.roteador.verificarAmnesiaSessao(this.usuarioAssociado.getNome(), this.gruposDaSessao);
+    if (erroAmnesia != null) {
+      forcarQuedaPorAmnesiaShard(erroAmnesia);
+      return true;
+    }
+    return false;
+  }
+
+  /**
    * Envia uma resposta textual serializada padronizada para o cliente via ObjectOutputStream.
    * Compativel com qualquer cliente que faca readObject de String.
    * 
@@ -232,6 +277,9 @@ public class AtendimentoCliente implements Runnable {
 
     switch (comando) {
       case Protocolo.PING:
+        if (verificarEDerrubarSeAmnesia()) {
+          break;
+        }
         enviarResposta(Protocolo.OK, "ATIVO");
         long totalPings = totalPingsAtendidos.incrementAndGet();
         long agora = System.currentTimeMillis();
@@ -242,6 +290,7 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.JOIN:
+        this.ultimoRegistroOuJoinMs = System.currentTimeMillis();
         String grupoJoin = apdu.getNomeGrupo();
         String ipJoin = conexao.getInetAddress().getHostAddress();
         InfoUser usuarioJoin = new InfoUser(apdu.getNomeUsuario(), ipJoin, apdu.getPortaClienteUDP());
@@ -257,6 +306,11 @@ public class AtendimentoCliente implements Runnable {
         Operacao opJoin = Operacao.entrarGrupo(
             apdu.getIdRequisicao(), grupoJoin, apdu.getNomeUsuario(), ipJoin, apdu.getPortaClienteUDP());
         Resultado resJoin = executarNoShard(shardGrupoJoin, opJoin);
+        if (grupoJoin != null && !grupoJoin.trim().isEmpty()
+            && (resJoin.isSucesso()
+                || (resJoin.getMensagem() != null && resJoin.getMensagem().startsWith("Voce ja esta no grupo")))) {
+          this.gruposDaSessao.add(grupoJoin.trim());
+        }
         enviarResposta(resJoin.getOperacaoRetorno(), resJoin.getMensagem());
         if (resJoin.isNotificarAtualizacaoUsuarios()) {
           dispararUpdateUsuariosGlobal();
@@ -283,6 +337,7 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.REGISTER:
+        this.ultimoRegistroOuJoinMs = System.currentTimeMillis();
         String ipReg = conexao.getInetAddress().getHostAddress();
         InfoUser usuarioRegister = new InfoUser(apdu.getNomeUsuario(), ipReg, apdu.getPortaClienteUDP());
         if (this.usuarioAssociado == null) {
@@ -306,6 +361,7 @@ public class AtendimentoCliente implements Runnable {
 
       case Protocolo.LOGOUT:
         this.gerenciador.desvincularSessao(apdu.getNomeUsuario(), this);
+        this.gruposDaSessao.clear();
         this.usuarioAssociado = null;
         if (this.roteador != null) {
           Resultado resLogout = this.roteador.removerUsuarioGlobal(apdu.getIdRequisicao(), apdu.getNomeUsuario());
@@ -329,6 +385,7 @@ public class AtendimentoCliente implements Runnable {
       case Protocolo.LEAVE:
         String grupoLeave = apdu.getNomeGrupo();
         if (grupoLeave != null && !grupoLeave.equalsIgnoreCase("GLOBAL")) {
+          this.gruposDaSessao.removeIf(g -> g.equalsIgnoreCase(grupoLeave.trim()));
           int shardLeave = Particionador.shardDe(grupoLeave);
           if (this.roteador != null) {
             ClusterLog.info("PROXY:TCP", String.format("Roteando LEAVE de '%s' no grupo '%s' -> %s",
@@ -340,6 +397,7 @@ public class AtendimentoCliente implements Runnable {
           System.out.println("[ATENDIMENTO] [INFO] Processamento de LEAVE de '" + apdu.getNomeUsuario() + "' concluido.");
         } else {
           this.gerenciador.desvincularSessao(apdu.getNomeUsuario(), this);
+          this.gruposDaSessao.clear();
           this.usuarioAssociado = null;
           if (this.roteador != null) {
             this.roteador.removerUsuarioGlobal(apdu.getIdRequisicao(), apdu.getNomeUsuario());
@@ -357,6 +415,9 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.LIST:
+        if (verificarEDerrubarSeAmnesia()) {
+          break;
+        }
         List<String> grupos = (this.roteador != null)
             ? this.roteador.listarGruposGlobal()
             : this.gerenciador.listarGrupos();
@@ -369,6 +430,9 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.USERS:
+        if (verificarEDerrubarSeAmnesia()) {
+          break;
+        }
         Collection<InfoUser> usuarios = (this.roteador != null)
             ? this.roteador.coletarTodosUsuariosAtivos()
             : this.gerenciador.getTodosUsuariosAtivos();
@@ -386,6 +450,9 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.MEMBERS:
+        if (verificarEDerrubarSeAmnesia()) {
+          break;
+        }
         String grupoList = apdu.getNomeGrupo();
         if (this.roteador != null) {
           RoteadorShards.ResultadoMembros rm = this.roteador.listarMembrosGrupo(grupoList);
@@ -419,6 +486,9 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.BLOCK:
+        if (verificarEDerrubarSeAmnesia()) {
+          break;
+        }
         String usuarioABloquear = apdu.getDestinatario();
         String bloqueador = apdu.getNomeUsuario();
         Resultado resBlock = executarBloqueioGlobal(true, apdu.getIdRequisicao(), bloqueador, usuarioABloquear);
@@ -427,6 +497,9 @@ public class AtendimentoCliente implements Runnable {
         break;
 
       case Protocolo.UNBLOCK:
+        if (verificarEDerrubarSeAmnesia()) {
+          break;
+        }
         String usuarioADesbloquear = apdu.getDestinatario();
         String desbloqueador = apdu.getNomeUsuario();
         Resultado resUnblock = executarBloqueioGlobal(false, apdu.getIdRequisicao(), desbloqueador, usuarioADesbloquear);

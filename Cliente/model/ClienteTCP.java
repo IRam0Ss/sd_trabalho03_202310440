@@ -18,7 +18,11 @@ import java.net.InetSocketAddress;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.UnknownHostException;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
 
 import Protocol.APDU;
 import utils.InfoUser;
@@ -47,6 +51,10 @@ public class ClienteTCP {
   private ObjectOutputStream saidaObjetos;
   private ObjectInputStream entradaObjetos;
   private volatile ListenerFalhaConexao listenerFalha;
+  /** Grupos ativos do cliente, reenviados automaticamente via JOIN em caso de Failover / Amnesia de Shard. */
+  private final Set<String> gruposAtivos = ConcurrentHashMap.newKeySet();
+  /** Usuarios bloqueados nesta sessao, reaplicados automaticamente apos Failover / Amnesia de Shard. */
+  private final Set<String> usuariosBloqueados = ConcurrentHashMap.newKeySet();
 
   private static final int CONNECT_TIMEOUT_MS = 1000;
   private static final int READ_TIMEOUT_MS = 3500;
@@ -182,6 +190,45 @@ public class ClienteTCP {
   }
 
   /**
+   * Executa JOIN direto no socket recem-conectado durante o failover para reconstruir salas em shards reiniciados.
+   */
+  public APDU joinDireto(String nomeGrupo, InfoUser usuario) throws IOException {
+    APDU apdu = new APDU("JOIN", nomeGrupo, usuario.getNome(), null, usuario.getPorta());
+    apdu.setIdRequisicao(UUID.randomUUID().toString());
+    try {
+      return enviarUmaVez(apdu);
+    } catch (ClassNotFoundException e) {
+      throw new IOException("Resposta invalida no JOIN de reconstrucao: " + e.getMessage(), e);
+    }
+  }
+
+  /**
+   * Executa BLOCK direto no socket recem-conectado durante o failover para restaurar bloqueios em shards reiniciados.
+   */
+  public APDU blockDireto(String usuarioDestino, InfoUser usuario) throws IOException {
+    APDU apdu = new APDU("BLOCK", null, usuario.getNome(), null, usuario.getPorta(), usuarioDestino);
+    apdu.setIdRequisicao(UUID.randomUUID().toString());
+    try {
+      return enviarUmaVez(apdu);
+    } catch (ClassNotFoundException e) {
+      throw new IOException("Resposta invalida no BLOCK de reconstrucao: " + e.getMessage(), e);
+    }
+  }
+
+  public List<String> getGruposAtivos() {
+    return new ArrayList<>(gruposAtivos);
+  }
+
+  public List<String> getUsuariosBloqueados() {
+    return new ArrayList<>(usuariosBloqueados);
+  }
+
+  public void limparEstadoSessao() {
+    gruposAtivos.clear();
+    usuariosBloqueados.clear();
+  }
+
+  /**
    * Executa um comando APDU garantindo idRequisicao unico e reconexao automatica transparente
    * caso o socket TCP sofra queda (IOException, SocketException ou EOFException).
    */
@@ -217,10 +264,14 @@ public class ClienteTCP {
       System.out.println("[CLIENTE:TCP] [FAILOVER] Queda do socket TCP detectada em '" + op
           + "' (" + erroInicial.getClass().getSimpleName() + "). Acionando reconexao via Discovery UDP...");
 
-      if (Protocolo.PING.equals(op)) {
-        // Dispara failover assincrono sem bloquear chamadores de PING
+      String nomeThread = Thread.currentThread().getName();
+      boolean ehThreadUi = nomeThread != null
+          && (nomeThread.contains("JavaFX") || nomeThread.contains("AWT-EventQueue"));
+
+      if (Protocolo.PING.equals(op) || ehThreadUi) {
+        // Dispara failover puramente assincrono sem jamais bloquear PING ou a Thread da UI!
         new Thread(() -> listener.onQuedaSocketTCP(erroInicial), "Thread-Trigger-Failover").start();
-        return new APDU(Protocolo.ERRO, null, null, "Conexao perdida: failover iniciado", 0);
+        return new APDU(Protocolo.ERRO, null, null, "Conexao perdida: reconectando via Discovery UDP...", 0);
       }
 
       boolean reconectou = listener.onQuedaSocketTCP(erroInicial);
@@ -254,10 +305,23 @@ public class ClienteTCP {
   public APDU join(String nomeGrupo, InfoUser usuario) {
     APDU apdu = new APDU("JOIN", nomeGrupo, usuario.getNome(), null, usuario.getPorta());
     System.out.println("[CLIENTE:TCP] [INFO] JOIN enviado ao servidor: " + usuario.toString());
-    return executarComando(apdu);
+    APDU resp = executarComando(apdu);
+    if (nomeGrupo != null && !nomeGrupo.trim().isEmpty() && resp != null
+        && (Protocolo.OK.equals(resp.getOperacao())
+            || (resp.getTextoMensagem() != null && resp.getTextoMensagem().startsWith("Voce ja esta no grupo")))) {
+      gruposAtivos.add(nomeGrupo.trim());
+    }
+    return resp;
   }
 
   public APDU leave(String nomeGrupo, InfoUser usuario) {
+    if (nomeGrupo != null) {
+      if ("GLOBAL".equalsIgnoreCase(nomeGrupo.trim())) {
+        gruposAtivos.clear();
+      } else {
+        gruposAtivos.removeIf(g -> g.equalsIgnoreCase(nomeGrupo.trim()));
+      }
+    }
     APDU apdu = new APDU("LEAVE", nomeGrupo, usuario.getNome(), null, usuario.getPorta());
     System.out.println("[CLIENTE:TCP] [INFO] LEAVE enviado ao servidor: " + usuario.toString());
     return executarComando(apdu);
@@ -286,10 +350,18 @@ public class ClienteTCP {
 
   public APDU block(String usuarioDestino, InfoUser usuario) {
     APDU apdu = new APDU("BLOCK", null, usuario.getNome(), null, usuario.getPorta(), usuarioDestino);
-    return executarComando(apdu);
+    APDU resp = executarComando(apdu);
+    if (usuarioDestino != null && !usuarioDestino.trim().isEmpty()
+        && resp != null && Protocolo.OK.equals(resp.getOperacao())) {
+      usuariosBloqueados.add(usuarioDestino.trim());
+    }
+    return resp;
   }
 
   public APDU unblock(String usuarioDestino, InfoUser usuario) {
+    if (usuarioDestino != null) {
+      usuariosBloqueados.removeIf(u -> u.equalsIgnoreCase(usuarioDestino.trim()));
+    }
     APDU apdu = new APDU("UNBLOCK", null, usuario.getNome(), null, usuario.getPorta(), usuarioDestino);
     return executarComando(apdu);
   }

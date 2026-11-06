@@ -393,12 +393,19 @@ public class GerenciadorConexao {
   /**
    * Chamado pelo ClienteTCP quando um comando de usuario captura IOException / SocketException / EOFException.
    * Dispara (ou aguarda) a reconexao via Discovery UDP para que o comando seja repetido no novo lider.
+   * Nunca bloqueia a Thread de UI (JavaFX / AWT).
    */
   private boolean aguardarOuDispararFailover(IOException causa) {
     if (!executando) {
       return false;
     }
     executarFailover();
+
+    String nomeThread = Thread.currentThread().getName();
+    if (nomeThread != null && (nomeThread.contains("JavaFX") || nomeThread.contains("AWT-EventQueue"))) {
+      return false;
+    }
+
     CountDownLatch latch = this.latchFailoverAtual;
     if (latch != null) {
       try {
@@ -411,10 +418,11 @@ public class GerenciadorConexao {
   }
 
   /**
-   * Limpa o socket antigo, executa Discovery UDP automatico para localizar qualquer lider de Shard
-   * sobrevivente na rede e restabelece a sessao TCP + UDP de forma transparente.
+   * Limpa o socket antigo, atualiza a UI de forma puramente assincrona ("Reconectando..."),
+   * executa Discovery UDP automatico em thread dedicada e reconstroi integralmente o estado
+   * volátil (REGISTER + JOINs + BLOCKs) no cluster.
    */
-  public synchronized boolean executarFailover() {
+  public boolean executarFailover() {
     if (!executando) {
       return false;
     }
@@ -434,21 +442,31 @@ public class GerenciadorConexao {
     this.latchFailoverAtual = latch;
     this.ultimoFailoverSucesso = false;
 
-    System.out.println("\n[FAILOVER] >>> QUEDA DO GATEWAY (" + hostAntigo + ":" + portaAntiga
-        + ") DETECTADA! INICIANDO DISCOVERY UDP AUTOMATICO <<<");
+    System.out.println("\n[FAILOVER] >>> QUEDA OU INVALIDACAO DO SOCKET (" + hostAntigo + ":" + portaAntiga
+        + ") DETECTADA! ATUALIZANDO UI E INICIANDO DISCOVERY UDP AUTOMATICO <<<");
+
+    // 2. Dispara atualizacao puramente assincrona da UI ANTES de iniciar qualquer laco bloqueante de rede
     if (listener != null) {
       listener.onConexaoPerdida();
     }
 
-    new Thread(() -> {
+    Thread threadFailover = new Thread(() -> {
       try {
+        // Cede um pulso curto para o JavaFX renderizar "Status: Reconectando..." na tela antes do I/O
+        try {
+          Thread.sleep(250);
+        } catch (InterruptedException ie) {
+          Thread.currentThread().interrupt();
+          return;
+        }
+
         boolean encontrou = false;
         int tentativasGerais = 0;
 
         while (!encontrou && executando && tentativasGerais < 30) {
           tentativasGerais++;
 
-          // 2. Dispara Discovery UDP automatico para encontrar qualquer lider de Shard vivo na rede
+          // 3. Dispara Discovery UDP automatico para encontrar qualquer lider de Shard vivo na rede
           List<EnderecoServidor> descobertos = descobrirServidoresViaUDP(900);
           for (EnderecoServidor d : descobertos) {
             adicionarOuAtualizarServidor(d);
@@ -488,7 +506,7 @@ public class GerenciadorConexao {
             }
           }
 
-          // Deixa o endpoint que acabou de cair por ultimo (caso tenha apenas reiniciado rapido)
+          // Deixa o endpoint anterior por ultimo (permite reconectar nele se o motivo foi Amnesia de outro Shard!)
           if (endpointAntigo != null && !candidatos.contains(endpointAntigo)) {
             candidatos.add(endpointAntigo);
           }
@@ -516,14 +534,34 @@ public class GerenciadorConexao {
                 // Atualiza o destino do socket UDP preservando a porta local efemera do cliente
                 udp.setDestino(end.host, end.portaUdp);
 
-                // Re-registra/atualiza endpoint do usuario atraves do novo Gateway
+                // 4. Reconstroi integralmente o estado volátil nos shards: REGISTER + JOINs + BLOCKs
                 if (usuarioAtual != null) {
+                  InfoUser novoInfo = new InfoUser(usuarioAtual.getNome(), tcp.getIpLocal(), udp.getPortaLocal());
+                  this.usuarioAtual = novoInfo;
                   try {
-                    InfoUser novoInfo = new InfoUser(usuarioAtual.getNome(), tcp.getIpLocal(), udp.getPortaLocal());
                     tcp.registerDireto(novoInfo);
-                    this.usuarioAtual = novoInfo;
+                    System.out.println("[FAILOVER] [REBUILD] REGISTER reenviado com sucesso para '"
+                        + novoInfo.getNome() + "' (" + novoInfo.getIp() + ":" + novoInfo.getPorta() + ").");
                   } catch (Exception exReg) {
                     System.out.println("[FAILOVER] Aviso ao re-registrar usuario no novo gateway: " + exReg.getMessage());
+                  }
+
+                  List<String> gruposParaReconstruir = tcp.getGruposAtivos();
+                  for (String grupo : gruposParaReconstruir) {
+                    try {
+                      tcp.joinDireto(grupo, novoInfo);
+                      System.out.println("[FAILOVER] [REBUILD] JOIN reenviado com sucesso para o grupo '" + grupo + "'.");
+                    } catch (Exception exJoin) {
+                      System.out.println("[FAILOVER] Aviso ao re-ingressar no grupo '" + grupo + "': " + exJoin.getMessage());
+                    }
+                  }
+
+                  List<String> bloqueadosParaReconstruir = tcp.getUsuariosBloqueados();
+                  for (String alvoBloqueado : bloqueadosParaReconstruir) {
+                    try {
+                      tcp.blockDireto(alvoBloqueado, novoInfo);
+                    } catch (Exception ignored) {
+                    }
                   }
                 }
 
@@ -555,7 +593,9 @@ public class GerenciadorConexao {
         emFailover.set(false);
         latch.countDown();
       }
-    }, "Thread-ExecucaoFailover").start();
+    }, "Thread-ExecucaoFailover");
+    threadFailover.setDaemon(true);
+    threadFailover.start();
 
     return true;
   }

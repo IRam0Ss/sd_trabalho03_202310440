@@ -99,11 +99,12 @@ public final class MensagensShard {
     }
   }
 
-  /** Tipos de consulta read-only entre shards (Fase 4: LIST, USERS, MEMBERS). */
+  /** Tipos de consulta read-only entre shards (Fase 4: LIST, USERS, MEMBERS; Fase 6: VERIFICAR_SESSAO_USUARIO). */
   public enum TipoConsulta {
     LISTAR_GRUPOS,
     LISTAR_USUARIOS,
-    MEMBROS_GRUPO
+    MEMBROS_GRUPO,
+    VERIFICAR_SESSAO_USUARIO
   }
 
   /** Pedido de leitura direcionado ao lider de um shard especifico. */
@@ -113,6 +114,7 @@ public final class MensagensShard {
     public final int shardDestino;
     public final TipoConsulta tipo;
     public final String parametro;
+    public final ArrayList<String> gruposEsperados;
     public final String hostResposta;
     public final int portaResposta;
     public final int shardOrigem;
@@ -120,10 +122,16 @@ public final class MensagensShard {
 
     public PedidoConsulta(String idCorrelacao, int shardDestino, TipoConsulta tipo, String parametro,
         String hostResposta, int portaResposta, int shardOrigem, int idNoOrigem) {
+      this(idCorrelacao, shardDestino, tipo, parametro, null, hostResposta, portaResposta, shardOrigem, idNoOrigem);
+    }
+
+    public PedidoConsulta(String idCorrelacao, int shardDestino, TipoConsulta tipo, String parametro,
+        ArrayList<String> gruposEsperados, String hostResposta, int portaResposta, int shardOrigem, int idNoOrigem) {
       this.idCorrelacao = idCorrelacao;
       this.shardDestino = shardDestino;
       this.tipo = tipo;
       this.parametro = parametro;
+      this.gruposEsperados = gruposEsperados;
       this.hostResposta = hostResposta;
       this.portaResposta = portaResposta;
       this.shardOrigem = shardOrigem;
@@ -140,15 +148,43 @@ public final class MensagensShard {
     public final ArrayList<String> grupos;
     public final ArrayList<InfoUser> usuarios;
     public final String erro;
+    public final boolean sessaoValida;
+    public final String motivoInvalidez;
 
     public RespostaConsulta(String idCorrelacao, Status status, int idLider, ArrayList<String> grupos,
         ArrayList<InfoUser> usuarios, String erro) {
+      this(idCorrelacao, status, idLider, grupos, usuarios, erro, true, null);
+    }
+
+    public RespostaConsulta(String idCorrelacao, Status status, int idLider, ArrayList<String> grupos,
+        ArrayList<InfoUser> usuarios, String erro, boolean sessaoValida, String motivoInvalidez) {
       this.idCorrelacao = idCorrelacao;
       this.status = status;
       this.idLider = idLider;
       this.grupos = grupos;
       this.usuarios = usuarios;
       this.erro = erro;
+      this.sessaoValida = sessaoValida;
+      this.motivoInvalidez = motivoInvalidez;
+    }
+  }
+
+  /**
+   * Notificacao inter-shard disparada quando um shard reiniciado (amnesia de RAM) recebe operacao/pacote
+   * de um usuario desconhecido, instruindo o gateway de entrada a fechar o socket TCP desse cliente.
+   */
+  public static class InvalidaSessaoCliente implements Serializable {
+    private static final long serialVersionUID = 1L;
+    public final String idEvento;
+    public final String nomeUsuario;
+    public final String motivo;
+    public final int shardOrigem;
+
+    public InvalidaSessaoCliente(String idEvento, String nomeUsuario, String motivo, int shardOrigem) {
+      this.idEvento = idEvento;
+      this.nomeUsuario = nomeUsuario;
+      this.motivo = motivo;
+      this.shardOrigem = shardOrigem;
     }
   }
 

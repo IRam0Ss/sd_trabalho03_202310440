@@ -89,9 +89,7 @@ public class ClienteGUI extends Application implements MessageListener {
   private String ultimoCodinome = "";
   private String ultimoEnderecoCluster = "";
   private Thread threadRecepcao;
-  private Label lblStatus;
-  private Label lblStatusDetalhe;
-  private Circle statusDot;
+  private HBox pillShardRef;
   private Label lblTopShardStatus;
   private Circle topStatusDot;
 
@@ -362,10 +360,10 @@ public class ClienteGUI extends Application implements MessageListener {
     this.shardEntradaConectado = shardResolvido;
     String nomeShard = rotuloShardEntrada(shardResolvido, pTcp);
     String textoTopo = "Status: Conectado (Porta de Entrada: " + nomeShard + ")";
-    String hostLimpo = ("127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host)) ? "Localhost" : host;
-    String detalheTecnico = hostLimpo + " \u2022 TCP " + pTcp
-        + (shardResolvido >= 0 ? " \u2022 " + faixaShard(shardResolvido) : "");
 
+    if (pillShardRef != null) {
+      pillShardRef.setStyle("");
+    }
     if (lblTopShardStatus != null) {
       lblTopShardStatus.setText(textoTopo);
       lblTopShardStatus.setTextFill(Color.web("#c9d873"));
@@ -374,17 +372,6 @@ public class ClienteGUI extends Application implements MessageListener {
     }
     if (topStatusDot != null) {
       topStatusDot.setFill(Color.web("#c9d873"));
-    }
-    if (lblStatus != null) {
-      lblStatus.setText("Porta de Entrada: " + nomeShard);
-      lblStatus.setTextFill(Color.web("#c9d873"));
-      lblStatus.setTooltip(new Tooltip(textoTopo + " (" + host + ":" + pTcp + ")"));
-    }
-    if (lblStatusDetalhe != null) {
-      lblStatusDetalhe.setText(detalheTecnico);
-    }
-    if (statusDot != null) {
-      statusDot.setFill(Color.web("#c9d873"));
     }
     if (stagePrincipal != null && eu != null) {
       stagePrincipal.setTitle("E.D.E.N. \u2014 Agente: " + eu.getNome() + "  |  " + textoTopo);
@@ -750,6 +737,7 @@ public class ClienteGUI extends Application implements MessageListener {
     HBox pillShard = new HBox(8);
     pillShard.setAlignment(Pos.CENTER_LEFT);
     pillShard.getStyleClass().add("shard-status-pill");
+    this.pillShardRef = pillShard;
 
     this.topStatusDot = new Circle(4.5, Color.web("#c9d873"));
     FadeTransition topPulse = new FadeTransition(Duration.seconds(1), topStatusDot);
@@ -929,33 +917,9 @@ public class ClienteGUI extends Application implements MessageListener {
     btnRefresh.setOnAction(e -> refreshOnlineUsers());
     addHoverScale(btnRefresh);
 
-    // -- Status de Conexao & Botao Voltar --
+    // -- Separador inferior & Botoes de Sessao (Status fica exclusivamente na barra superior) --
     Separator sep2 = new Separator();
     sep2.setStyle("-fx-background-color: #8a9b3a;");
-
-    HBox statusBox = new HBox(7);
-    statusBox.setAlignment(Pos.CENTER_LEFT);
-    statusBox.setPadding(new Insets(3, 6, 3, 6));
-    statusBox.setStyle("-fx-background-color: rgba(35, 48, 15, 0.6); -fx-background-radius: 10px; -fx-border-color: rgba(138, 155, 58, 0.35); -fx-border-radius: 10px; -fx-border-width: 1px;");
-    this.statusDot = new Circle(4.5, Color.web("#c9d873"));
-    // Pulsing animation for the dot
-    FadeTransition pulse = new FadeTransition(Duration.seconds(1), statusDot);
-    pulse.setFromValue(0.4);
-    pulse.setToValue(1.0);
-    pulse.setCycleCount(javafx.animation.Animation.INDEFINITE);
-    pulse.setAutoReverse(true);
-    pulse.play();
-
-    this.lblStatus = new Label();
-    this.lblStatus.setFont(Font.font("Segoe UI", FontWeight.BOLD, 11));
-    this.lblStatus.setTextFill(Color.web("#c9d873"));
-
-    this.lblStatusDetalhe = new Label();
-    this.lblStatusDetalhe.setFont(Font.font("Consolas", 10));
-    this.lblStatusDetalhe.setTextFill(Color.web("#8a9b3a"));
-
-    VBox statusTextos = new VBox(1, lblStatus, lblStatusDetalhe);
-    statusBox.getChildren().addAll(statusDot, statusTextos);
 
     String hostConectado = (tcp != null && tcp.getIpServidor() != null) ? tcp.getIpServidor() : "127.0.0.1";
     int portaConectada = (tcp != null) ? tcp.getPortaServidor() : portaServidor;
@@ -967,9 +931,12 @@ public class ClienteGUI extends Application implements MessageListener {
     btnDesconectar.setMaxWidth(Double.MAX_VALUE);
     addHoverScale(btnDesconectar);
     btnDesconectar.setOnAction(e -> {
-      desconectarLimpo();
-      watermark.setOpacity(0.18); // restore watermark opacity
-      watermark.setVisible(true); // make sure it's visible again
+      // Executa encerramento de rede em background para nunca travar a UI caso o socket tenha caido
+      new Thread(this::desconectarLimpo, "Thread-DesconectarUI").start();
+      if (watermark != null) {
+        watermark.setOpacity(0.18);
+        watermark.setVisible(true);
+      }
       switchView(createSplash());
     });
 
@@ -986,7 +953,7 @@ public class ClienteGUI extends Application implements MessageListener {
         boxGruposHeader, txtSearchGroups, groupList, grpBtns, grpBtns2,
         sep,
         boxUsersHeader, txtSearchUsers, onlineUsersList, btnRefresh,
-        sep2, statusBox, btnTutorial, btnDesconectar);
+        sep2, btnTutorial, btnDesconectar);
 
     // ===== AREA CENTRAL DO CHAT =====
     VBox centerArea = new VBox(0);
@@ -1290,18 +1257,22 @@ public class ClienteGUI extends Application implements MessageListener {
 
             showChoiceOverlay("Grupos Disponiveis", "Selecione um grupo para entrar:", gruposList,
                 grupoEscolhido -> {
-                  if (grupoEscolhido != null) {
-                    APDU res = tcp.join(grupoEscolhido, eu);
-                    if (res != null && Protocolo.OK.equals(res.getOperacao())) {
-                      if (!masterGroupData.contains(grupoEscolhido)) {
-                        masterGroupData.add(grupoEscolhido);
-                      }
-                      groupList.getSelectionModel().select(grupoEscolhido);
-                      addChatBubble(grupoEscolhido, "SYSTEM",
-                          "Voc\u00EA entrou no grupo " + grupoEscolhido + ".", false, false, true);
-                    } else if (res != null && Protocolo.ERRO.equals(res.getOperacao())) {
-                      showErrorOverlay("Erro ao Entrar", res.getTextoMensagem());
-                    }
+                  if (grupoEscolhido != null && tcp != null && eu != null) {
+                    new Thread(() -> {
+                      APDU res = tcp.join(grupoEscolhido, eu);
+                      Platform.runLater(() -> {
+                        if (res != null && Protocolo.OK.equals(res.getOperacao())) {
+                          if (!masterGroupData.contains(grupoEscolhido)) {
+                            masterGroupData.add(grupoEscolhido);
+                          }
+                          groupList.getSelectionModel().select(grupoEscolhido);
+                          addChatBubble(grupoEscolhido, "SYSTEM",
+                              "Voc\u00EA entrou no grupo " + grupoEscolhido + ".", false, false, true);
+                        } else if (res != null && Protocolo.ERRO.equals(res.getOperacao())) {
+                          showErrorOverlay("Erro ao Entrar", res.getTextoMensagem());
+                        }
+                      });
+                    }, "Thread-JoinGrupoLista").start();
                   }
                 });
           } else if (resposta != null && Protocolo.ERRO.equals(resposta.getOperacao())) {
@@ -1404,16 +1375,22 @@ public class ClienteGUI extends Application implements MessageListener {
             : "-fx-background-color: transparent; -fx-text-fill: #c9d873; -fx-border-color: #5b6623; -fx-border-radius: 12px; -fx-background-radius: 12px; -fx-font-size: 11px; -fx-padding: 4px 10px; -fx-cursor: hand; -fx-font-weight: bold;");
 
         btnBlockAction.setOnAction(e -> {
+          final ClienteTCP tcpRef = this.tcp;
+          final InfoUser euRef = this.eu;
           if (meusBloqueados.contains(targetUser)) {
-            if (tcp != null) tcp.unblock(targetUser, eu);
             meusBloqueados.remove(targetUser);
             btnBlockAction.setText("\u2298 Bloquear");
             btnBlockAction.setStyle("-fx-background-color: transparent; -fx-text-fill: #c9d873; -fx-border-color: #5b6623; -fx-border-radius: 12px; -fx-background-radius: 12px; -fx-font-size: 11px; -fx-padding: 4px 10px; -fx-cursor: hand; -fx-font-weight: bold;");
+            if (tcpRef != null && euRef != null) {
+              new Thread(() -> tcpRef.unblock(targetUser, euRef), "Thread-UnblockUser").start();
+            }
           } else {
-            if (tcp != null) tcp.block(targetUser, eu);
             meusBloqueados.add(targetUser);
             btnBlockAction.setText("\u2298 Desbloquear");
             btnBlockAction.setStyle("-fx-background-color: rgba(160, 100, 20, 0.30); -fx-text-fill: #d4b06a; -fx-border-color: #d4b06a; -fx-border-radius: 12px; -fx-background-radius: 12px; -fx-font-size: 11px; -fx-padding: 4px 10px; -fx-cursor: hand; -fx-font-weight: bold;");
+            if (tcpRef != null && euRef != null) {
+              new Thread(() -> tcpRef.block(targetUser, euRef), "Thread-BlockUser").start();
+            }
           }
         });
         parentHeader.getChildren().add(btnBlockAction);
@@ -2328,23 +2305,20 @@ public class ClienteGUI extends Application implements MessageListener {
   @Override
   public void onConexaoPerdida() {
     Platform.runLater(() -> {
-      System.out.println("[GUI] [FAILOVER] Queda na Porta de Entrada detectada! Disparando Discovery UDP para reconectar...");
+      System.out.println("[GUI] [FAILOVER] Queda na Porta de Entrada detectada! Exibindo status 'Reconectando...'");
+      if (pillShardRef != null) {
+        pillShardRef.setStyle(
+            "-fx-background-color: rgba(85, 50, 10, 0.80); -fx-border-color: rgba(255, 179, 71, 0.85);");
+      }
       if (lblTopShardStatus != null) {
-        lblTopShardStatus.setText("Status: Reconectando via Discovery UDP...");
-        lblTopShardStatus.setTextFill(Color.web("#e5a53a"));
+        lblTopShardStatus.setText("Status: Reconectando... (Discovery UDP)");
+        lblTopShardStatus.setTextFill(Color.web("#ffb347"));
       }
       if (topStatusDot != null) {
-        topStatusDot.setFill(Color.web("#e5a53a"));
+        topStatusDot.setFill(Color.web("#ffb347"));
       }
-      if (lblStatus != null) {
-        lblStatus.setText("Reconectando via Discovery...");
-        lblStatus.setTextFill(Color.web("#e5a53a"));
-      }
-      if (lblStatusDetalhe != null) {
-        lblStatusDetalhe.setText("Buscando lider de Shard ativo...");
-      }
-      if (statusDot != null) {
-        statusDot.setFill(Color.web("#e5a53a"));
+      if (stagePrincipal != null && eu != null) {
+        stagePrincipal.setTitle("E.D.E.N. \u2014 Agente: " + eu.getNome() + "  |  Status: Reconectando...");
       }
     });
   }
@@ -2364,6 +2338,9 @@ public class ClienteGUI extends Application implements MessageListener {
       this.shardEntradaConectado = shardResolvido;
       this.ipServidor = ip + ":" + portaTcp + ":" + portaUdp;
       this.ultimoEnderecoCluster = this.ipServidor;
+      if (this.eu != null && this.tcp != null && this.udp != null) {
+        this.eu = new InfoUser(this.eu.getNome(), this.tcp.getIpLocal(), this.udp.getPortaLocal());
+      }
       atualizarIndicadorConexao(ip, portaTcp, shardResolvido);
       refreshOnlineUsers();
     });
@@ -2371,33 +2348,35 @@ public class ClienteGUI extends Application implements MessageListener {
 
   @Override
   public void onServerChanged(String novoIp, int novaPortaTcp, int novaPortaUdp) {
-    Platform.runLater(() -> {
-      int shardAtual = (this.shardEntradaConectado >= 0)
-          ? this.shardEntradaConectado
-          : (tcp != null ? identificarShardPorPortaTcp(tcp.getPortaServidor()) : -1);
-      int shardNovo = identificarShardPorPortaTcp(novaPortaTcp);
+    int shardAtual = (this.shardEntradaConectado >= 0)
+        ? this.shardEntradaConectado
+        : (tcp != null ? identificarShardPorPortaTcp(tcp.getPortaServidor()) : -1);
+    int shardNovo = identificarShardPorPortaTcp(novaPortaTcp);
 
-      if (gerenciadorConexao != null) {
-        gerenciadorConexao.adicionarServidor(novoIp, novaPortaTcp, novaPortaUdp, shardNovo);
-      }
+    if (gerenciadorConexao != null) {
+      gerenciadorConexao.adicionarServidor(novoIp, novaPortaTcp, novaPortaUdp, shardNovo);
+    }
 
-      // So migra proativamente por SERVER_CHANGED se o failover ocorreu no MESMO shard da Porta de Entrada atual;
-      // se outro shard trocou de replica interna, mantemos a Porta de Entrada atual intacta!
-      if (shardAtual >= 0 && shardNovo >= 0 && shardAtual != shardNovo) {
-        System.out.println("[GUI] [CLUSTER] Troca de replica interna no Shard S" + shardNovo
-            + " (" + novaPortaTcp + "). Porta de Entrada mantida no Shard S" + shardAtual + ".");
-        return;
-      }
+    // So migra proativamente por SERVER_CHANGED se o failover ocorreu no MESMO shard da Porta de Entrada atual;
+    // se outro shard trocou de replica interna, mantemos a Porta de Entrada atual intacta!
+    if (shardAtual >= 0 && shardNovo >= 0 && shardAtual != shardNovo) {
+      System.out.println("[GUI] [CLUSTER] Troca de replica interna no Shard S" + shardNovo
+          + " (" + novaPortaTcp + "). Porta de Entrada mantida no Shard S" + shardAtual + ".");
+      return;
+    }
 
-      System.out.println("[GUI] [CLUSTER] Aviso SERVER_CHANGED na Porta de Entrada -> "
-          + rotuloShardEntrada(shardNovo, novaPortaTcp) + " (" + novoIp + ":" + novaPortaTcp + ")");
-      this.portaServidor = novaPortaTcp;
-      this.shardEntradaConectado = shardNovo;
-      this.ipServidor = novoIp + ":" + novaPortaTcp + ":" + novaPortaUdp;
-      this.ultimoEnderecoCluster = this.ipServidor;
-      if (gerenciadorConexao != null) {
-        gerenciadorConexao.setShardEntradaAtual(shardNovo);
-      }
+    System.out.println("[GUI] [CLUSTER] Aviso SERVER_CHANGED na Porta de Entrada -> "
+        + rotuloShardEntrada(shardNovo, novaPortaTcp) + " (" + novoIp + ":" + novaPortaTcp + ")");
+    this.portaServidor = novaPortaTcp;
+    this.shardEntradaConectado = shardNovo;
+    this.ipServidor = novoIp + ":" + novaPortaTcp + ":" + novaPortaUdp;
+    this.ultimoEnderecoCluster = this.ipServidor;
+    if (gerenciadorConexao != null) {
+      gerenciadorConexao.setShardEntradaAtual(shardNovo);
+    }
+
+    // Troca socket em background para jamais travar a Thread JavaFX
+    new Thread(() -> {
       try {
         if (tcp != null) {
           tcp.setDestino(novoIp, novaPortaTcp);
@@ -2408,9 +2387,11 @@ public class ClienteGUI extends Application implements MessageListener {
       } catch (Exception e) {
         System.out.println("[GUI] [ERROR] Falha ao atualizar destino para novo servidor: " + e.getMessage());
       }
-      atualizarIndicadorConexao(novoIp, novaPortaTcp, shardNovo);
-      refreshOnlineUsers();
-    });
+      Platform.runLater(() -> {
+        atualizarIndicadorConexao(novoIp, novaPortaTcp, shardNovo);
+        refreshOnlineUsers();
+      });
+    }, "Thread-MigrarReplicaEntrada").start();
   }
 
   public synchronized void desconectarLimpo() {
@@ -2444,30 +2425,35 @@ public class ClienteGUI extends Application implements MessageListener {
       } catch (Exception ignored) {
       }
     }
-    if (tcp != null)
+    if (tcp != null) {
+      tcp.limparEstadoSessao();
       tcp.fecharConexao();
+    }
     if (udp != null)
       udp.fecharConexao();
     tcp = null;
     udp = null;
     eu = null;
-    chatHistories.clear();
-    unreadCounts.clear();
-    knownGroupMembers.clear();
-    try {
-      if (Platform.isFxApplicationThread()) {
+    currentChat = null;
+    Runnable limparEstadoUi = () -> {
+      try {
+        chatHistories.clear();
+        unreadCounts.clear();
+        knownGroupMembers.clear();
+        meusBloqueados.clear();
         masterGroupData.clear();
         masterUsersData.clear();
-      } else {
-        Platform.runLater(() -> {
-          try {
-            masterGroupData.clear();
-            masterUsersData.clear();
-          } catch (Exception ignored) {}
-        });
+      } catch (Exception ignored) {
       }
-    } catch (Exception ignored) {}
-    currentChat = null;
+    };
+    try {
+      if (Platform.isFxApplicationThread()) {
+        limparEstadoUi.run();
+      } else {
+        Platform.runLater(limparEstadoUi);
+      }
+    } catch (Exception ignored) {
+    }
   }
 
   @Override

@@ -109,6 +109,15 @@ public class GerenciadorGrupos implements Serializable {
     sessoesAtivas.remove(normalizar(nomeUsuario), sessao);
   }
 
+  public Object obterSessaoAtiva(String nomeUsuario) {
+    if (nomeUsuario == null) return null;
+    String busca = nomeUsuario.trim();
+    if (busca.startsWith("@")) {
+      busca = busca.substring(1).trim();
+    }
+    return sessoesAtivas.get(normalizar(busca));
+  }
+
   /**
    * Valida e encerra a sessao TCP local de um cliente que caiu bruscamente, retornando true
    * apenas se este no ainda estiver ATIVO e a sessao nao tiver sido renovada por reconexao.
@@ -579,6 +588,23 @@ public class GerenciadorGrupos implements Serializable {
       return Collections.emptySet();
     }
     return new HashSet<>(grupos.get(nomeGrupo));
+  }
+
+  public synchronized boolean isMembroGrupo(String nomeGrupo, String nomeUsuario) {
+    if (nomeGrupo == null || nomeUsuario == null) {
+      return false;
+    }
+    String norm = normalizar(nomeUsuario);
+    LinkedHashSet<String> membros = grupos.get(nomeGrupo);
+    if (membros != null && membros.contains(norm)) {
+      return true;
+    }
+    for (Map.Entry<String, LinkedHashSet<String>> e : grupos.entrySet()) {
+      if (e.getKey() != null && e.getKey().equalsIgnoreCase(nomeGrupo.trim()) && e.getValue().contains(norm)) {
+        return true;
+      }
+    }
+    return false;
   }
 
   public synchronized List<InfoUser> getMembrosEnvio(String nomeGrupo, InfoUser usuarioRemetente) {

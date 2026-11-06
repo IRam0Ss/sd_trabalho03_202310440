@@ -186,7 +186,18 @@ public class GerenciadorConexao {
       return new EnderecoServidor(remetenteIp, 5000, 6000, 0, "ATIVO");
     }
     if ("IP".equalsIgnoreCase(limpo) || "EDEN_HERE".equalsIgnoreCase(limpo)) {
-      return new EnderecoServidor(remetenteIp, 5000, 6000, 0, "ATIVO");
+      // Porta padrao canonica 6789 com fallback 5000
+      return new EnderecoServidor(remetenteIp, Protocolo.PORTA_SERVIDOR_TCP, Protocolo.PORTA_SERVIDOR_UDP, 0, "ATIVO");
+    }
+    // Resposta interoperavel de colegas/Lucas (MESTRE_PARTICAO_X)
+    String limpoUpper = limpo.toUpperCase();
+    for (int p = 1; p <= 3; p++) {
+      if (("MESTRE_PARTICAO_" + p).equals(limpoUpper) || limpoUpper.contains("PARTICAO_" + p) || limpoUpper.contains("PARTICAO " + p)) {
+        int idShard = p - 1;
+        int pTcp = Protocolo.PORTA_SERVIDOR_TCP + (p - 1);
+        int pUdp = Protocolo.PORTA_SERVIDOR_UDP + (p - 1);
+        return new EnderecoServidor(remetenteIp, pTcp, pUdp, idShard, "ATIVO");
+      }
     }
     return null;
   }
@@ -259,12 +270,23 @@ public class GerenciadorConexao {
       byte[] dadosCluster = Protocolo.DISCOVER_EDEN_CLUSTER.getBytes(StandardCharsets.UTF_8);
       byte[] dadosPadrao = "SERVIDOR_IP".getBytes(StandardCharsets.UTF_8);
       byte[] dadosEden = "DISCOVER_EDEN".getBytes(StandardCharsets.UTF_8);
+      byte[] dadosP1 = "QUEM_E_MESTRE_PARTICAO_1?".getBytes(StandardCharsets.UTF_8);
+      byte[] dadosP2 = "QUEM_E_MESTRE_PARTICAO_2?".getBytes(StandardCharsets.UTF_8);
+      byte[] dadosP3 = "QUEM_E_MESTRE_PARTICAO_3?".getBytes(StandardCharsets.UTF_8);
 
       List<InetAddress> destinos = coletarBroadcasts();
       for (InetAddress dest : destinos) {
         // Porta padrao de broadcast (8888) e porta legada EDEN (5001)
         enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY);
         enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY_EDEN);
+        enviarPacoteSilencioso(socket, dadosPadrao, dest, Protocolo.PORTA_DISCOVERY);
+        enviarPacoteSilencioso(socket, dadosEden, dest, Protocolo.PORTA_DISCOVERY_EDEN);
+
+        // Perguntas multi-particao (8888, 8889, 8890) compativeis com servidores de colegas/Lucas
+        enviarPacoteSilencioso(socket, dadosP1, dest, Protocolo.PORTA_DISCOVERY);
+        enviarPacoteSilencioso(socket, dadosP2, dest, Protocolo.PORTA_DISCOVERY + 1);
+        enviarPacoteSilencioso(socket, dadosP3, dest, Protocolo.PORTA_DISCOVERY + 2);
+
         // Portas dedicadas de cada Shard ativo (8898, 8899, 8900) para evitar sombra SO_REUSEADDR em loopback
         if (shardFiltro >= 0 && shardFiltro < NUM_SHARDS) {
           enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY + 10 + shardFiltro);
@@ -273,8 +295,6 @@ public class GerenciadorConexao {
             enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY + 10 + s);
           }
         }
-        enviarPacoteSilencioso(socket, dadosPadrao, dest, Protocolo.PORTA_DISCOVERY);
-        enviarPacoteSilencioso(socket, dadosEden, dest, Protocolo.PORTA_DISCOVERY_EDEN);
       }
 
       long limite = System.currentTimeMillis() + janela;

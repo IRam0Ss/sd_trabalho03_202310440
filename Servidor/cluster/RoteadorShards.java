@@ -278,6 +278,10 @@ public class RoteadorShards {
     ClusterLog.exibirTabelaLideresANSI(meuShard, host, tabela);
   }
 
+  public TabelaLideres getTabelaLideres() {
+    return tabela;
+  }
+
   public String getMeuHost() {
     return host;
   }

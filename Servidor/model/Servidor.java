@@ -102,20 +102,27 @@ public class Servidor {
           udpPrincipal.receberPacoteRoteado(apdu, ipCliente, portaUdpCliente, saltos));
     }
 
-    // 3. Servico Discovery padrao (8888) + porta dedicada do Shard (8898 + idShard) para loopback/LAN sem colisao
+    // 3. Servico Discovery padrao (8888) + porta dedicada do Shard (8888 + idShard) para colegas/Lucas
     ServidorDiscovery discPrincipal = new ServidorDiscovery(portaDiscovery);
     discPrincipal.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
+    if (roteador != null) {
+      discPrincipal.setTabelaLideres(roteador.getTabelaLideres());
+    }
     servicosDiscovery.add(discPrincipal);
     new Thread(discPrincipal, "Thread-ServidorDiscovery-" + portaDiscovery).start();
 
-    int portaDiscoveryShard = Protocolo.PORTA_DISCOVERY + 10 + Math.max(0, idShard);
+    // Portas especificas por particao (8888, 8889, 8890) compativeis com Lucas (8888 + particao - 1)
+    int portaDiscoveryColegas = Protocolo.PORTA_DISCOVERY + Math.max(0, idShard);
     boolean discoveryShardAberto = false;
-    if (portaDiscoveryShard != portaDiscovery && portaDiscoveryShard != Protocolo.PORTA_DISCOVERY_EDEN) {
+    if (portaDiscoveryColegas != portaDiscovery && portaDiscoveryColegas != Protocolo.PORTA_DISCOVERY_EDEN) {
       try {
-        ServidorDiscovery discShard = new ServidorDiscovery(portaDiscoveryShard);
+        ServidorDiscovery discShard = new ServidorDiscovery(portaDiscoveryColegas);
         discShard.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
+        if (roteador != null) {
+          discShard.setTabelaLideres(roteador.getTabelaLideres());
+        }
         servicosDiscovery.add(discShard);
-        new Thread(discShard, "Thread-ServidorDiscovery-Shard-" + portaDiscoveryShard).start();
+        new Thread(discShard, "Thread-ServidorDiscovery-Shard-" + portaDiscoveryColegas).start();
         discoveryShardAberto = true;
       } catch (Exception ignored) {
       }
@@ -124,8 +131,45 @@ public class Servidor {
     boolean discovery5001Aberto = false;
     boolean udp5000Aberto = false;
     boolean tcp5000ExtraAberto = false;
+    boolean tcp6789ExtraAberto = false;
+    boolean udp7777ExtraAberto = false;
 
-    // 4. Portas legadas para compatibilidade T#01/T#02 (ativas no lider do Shard 0)
+    // 4. Portas universais de entrada para interoperabilidade (6789 TCP / 7777 UDP)
+    // Se a portaTcp principal deste no nao for 6789, tenta abrir tambem a 6789 (ou 6789 + idShard)
+    // para absorver conexoes diretas de clientes de colegas (Gateway Proxy)
+    int portaTcpColegas = Protocolo.PORTA_SERVIDOR_TCP + Math.max(0, idShard);
+    if (portaTcp != portaTcpColegas && portaTcp != Protocolo.PORTA_SERVIDOR_TCP) {
+      try {
+        ServidorTCP tcpColegas = new ServidorTCP(portaTcpColegas, gerenciador, roteador);
+        servicosTCP.add(tcpColegas);
+        new Thread(tcpColegas, "Thread-ServidorTCP-Interoperavel-" + portaTcpColegas).start();
+        tcp6789ExtraAberto = true;
+      } catch (Exception ignored) {
+      }
+    }
+    // Tenta tambem abrir a base 6789 se for Shard 0 ou livre
+    if (idShard == 0 && portaTcp != Protocolo.PORTA_SERVIDOR_TCP && !tcp6789ExtraAberto) {
+      try {
+        ServidorTCP tcp6789 = new ServidorTCP(Protocolo.PORTA_SERVIDOR_TCP, gerenciador, roteador);
+        servicosTCP.add(tcp6789);
+        new Thread(tcp6789, "Thread-ServidorTCP-Base-6789").start();
+        tcp6789ExtraAberto = true;
+      } catch (Exception ignored) {
+      }
+    }
+
+    int portaUdpColegas = Protocolo.PORTA_SERVIDOR_UDP + Math.max(0, idShard);
+    if (portaUdp != portaUdpColegas && portaUdp != Protocolo.PORTA_SERVIDOR_UDP) {
+      try {
+        ServidorUDP udpColegas = new ServidorUDP(portaUdpColegas, gerenciador, roteador);
+        servicosUDP.add(udpColegas);
+        new Thread(udpColegas, "Thread-ServidorUDP-Interoperavel-" + portaUdpColegas).start();
+        udp7777ExtraAberto = true;
+      } catch (Exception ignored) {
+      }
+    }
+
+    // 5. Portas legadas para compatibilidade T#01/T#02 (ativas no lider do Shard 0)
     if (incluirLegado) {
       // O lider do Shard 0 assume tambem o TCP legado 5000 (clientes T#01/T#02 de colegas);
       // em failover, o novo lider do S0 reabre a 5000.
@@ -151,12 +195,15 @@ public class Servidor {
       }
     }
 
-    // 5. Discovery universal EDEN na porta UDP 5001: aberto por TODO lider de shard (SO_REUSEADDR),
+    // 6. Discovery universal EDEN na porta UDP 5001: aberto por TODO lider de shard (SO_REUSEADDR),
     //    assim qualquer cliente "burro" encontra algum lider via broadcast mesmo se o Shard 0 cair.
     if (portaDiscovery != Protocolo.PORTA_DISCOVERY_EDEN) {
       try {
         ServidorDiscovery discEden = new ServidorDiscovery(Protocolo.PORTA_DISCOVERY_EDEN);
         discEden.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
+        if (roteador != null) {
+          discEden.setTabelaLideres(roteador.getTabelaLideres());
+        }
         servicosDiscovery.add(discEden);
         new Thread(discEden, "Thread-ServidorDiscovery-Eden-5001").start();
         discovery5001Aberto = true;
@@ -168,10 +215,14 @@ public class Servidor {
     this.gerenciador.setAtivo(true);
     System.out.println("=== SERVICOS DE ATENDIMENTO ABERTOS (SHARD S" + idShard + " | PAPEL: ATIVO) ===");
     imprimirEnderecosLocais();
-    System.out.println("TCP escutando em " + portaTcp + (tcp5000ExtraAberto ? " (+ legado 5000)" : ""));
-    System.out.println("UDP escutando em " + portaUdp + (udp5000Aberto ? " (+ legado 5000)" : ""));
+    System.out.println("TCP escutando em " + portaTcp
+        + (tcp6789ExtraAberto ? " (+ interoperavel " + portaTcpColegas + ")" : "")
+        + (tcp5000ExtraAberto ? " (+ legado 5000)" : ""));
+    System.out.println("UDP escutando em " + portaUdp
+        + (udp7777ExtraAberto ? " (+ interoperavel " + portaUdpColegas + ")" : "")
+        + (udp5000Aberto ? " (+ legado 5000)" : ""));
     System.out.println("Discovery escutando em " + portaDiscovery
-        + (discoveryShardAberto ? ", " + portaDiscoveryShard : "")
+        + (discoveryShardAberto ? ", " + portaDiscoveryColegas : "")
         + (discovery5001Aberto ? " e " + Protocolo.PORTA_DISCOVERY_EDEN : ""));
     System.out.println("=================================================================");
   }

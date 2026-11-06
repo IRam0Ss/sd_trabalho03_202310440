@@ -14,14 +14,19 @@ import java.net.DatagramSocket;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import utils.Protocolo;
+import cluster.TabelaLideres;
 
 /**
- * Thread de discovery local (farol UDP) com suporte a busca de cluster/shard e compatibilidade legada.
- * Responde a "SERVIDOR_IP" -> "IP", "DISCOVER_EDEN" -> "EDEN_HERE" e
- * "DISCOVER_EDEN_CLUSTER" -> "EDEN_CLUSTER:id:papel:tcp:udp:idShard".
+ * Thread de discovery local (farol UDP) com suporte a busca de cluster/shard,
+ * compatibilidade legada e interoperabilidade universal com clientes heterogeneos (ex: Lucas).
+ * Responde a:
+ * - "QUEM_E_MESTRE_PARTICAO_X?" -> "MESTRE_PARTICAO_X" (ou IP proxy)
+ * - "SERVIDOR_IP" -> "IP"
+ * - "DISCOVER_EDEN" -> "EDEN_HERE"
+ * - "DISCOVER_EDEN_CLUSTER" -> "EDEN_CLUSTER:id:papel:tcp:udp:idShard"
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 3.1
+ * @version 4.0
  */
 public class ServidorDiscovery implements Runnable {
 
@@ -33,6 +38,7 @@ public class ServidorDiscovery implements Runnable {
   private int portaTcp = Protocolo.PORTA_SERVIDOR_TCP;
   private int portaUdp = Protocolo.PORTA_SERVIDOR_UDP;
   private String papel = "ATIVO";
+  private TabelaLideres tabelaLideres;
 
   public ServidorDiscovery() {
     this(Protocolo.PORTA_DISCOVERY);
@@ -40,6 +46,10 @@ public class ServidorDiscovery implements Runnable {
 
   public ServidorDiscovery(int porta) {
     this.porta = porta;
+  }
+
+  public void setTabelaLideres(TabelaLideres tabela) {
+    this.tabelaLideres = tabela;
   }
 
   public void configurarInfo(int idNo, String papel, int portaTcp, int portaUdp) {
@@ -87,25 +97,66 @@ public class ServidorDiscovery implements Runnable {
 
         String mensagem = new String(pacoteRecebido.getData(), 0, pacoteRecebido.getLength(),
             StandardCharsets.UTF_8).trim();
+        String msgUpper = mensagem.toUpperCase();
 
-        if ("SERVIDOR_IP".equalsIgnoreCase(mensagem)) {
+        // 1. Dialeto T1/T2 ou colegas (SERVIDOR_IP)
+        if ("SERVIDOR_IP".equalsIgnoreCase(mensagem) || "SERVIDOR_IP?".equalsIgnoreCase(mensagem)) {
           byte[] dadosResposta = "IP".getBytes(StandardCharsets.UTF_8);
           DatagramPacket pacoteResposta = new DatagramPacket(dadosResposta, dadosResposta.length,
               pacoteRecebido.getAddress(), pacoteRecebido.getPort());
           socket.send(pacoteResposta);
-        } else if ("DISCOVER_EDEN".equalsIgnoreCase(mensagem)) {
+          continue;
+        }
+
+        // 2. Dialeto Nativo EDEN simples
+        if ("DISCOVER_EDEN".equalsIgnoreCase(mensagem)) {
           byte[] dadosResposta = "EDEN_HERE".getBytes(StandardCharsets.UTF_8);
           DatagramPacket pacoteResposta = new DatagramPacket(dadosResposta, dadosResposta.length,
               pacoteRecebido.getAddress(), pacoteRecebido.getPort());
           socket.send(pacoteResposta);
-        } else if (Protocolo.DISCOVER_EDEN_CLUSTER.equalsIgnoreCase(mensagem)) {
-          // 6o campo (:idShard) mantem total retrocompatibilidade com clientes que leem p.length >= 5
+          continue;
+        }
+
+        // 3. Dialeto Nativo EDEN Cluster enriquecido
+        if (Protocolo.DISCOVER_EDEN_CLUSTER.equalsIgnoreCase(mensagem)) {
           String respostaCluster = String.format("EDEN_CLUSTER:%d:%s:%d:%d:%d",
               idNo, papel, portaTcp, portaUdp, idShard);
           byte[] dadosResposta = respostaCluster.getBytes(StandardCharsets.UTF_8);
           DatagramPacket pacoteResposta = new DatagramPacket(dadosResposta, dadosResposta.length,
               pacoteRecebido.getAddress(), pacoteRecebido.getPort());
           socket.send(pacoteResposta);
+          continue;
+        }
+
+        // 4. Dialeto Universal Sharded (Ex: Colega Lucas "QUEM_E_MESTRE_PARTICAO_X?")
+        //    Particoes 1, 2 e 3 correspondem aos nossos Shards 0, 1 e 2.
+        for (int p = 1; p <= 3; p++) {
+          if (("QUEM_E_MESTRE_PARTICAO_" + p + "?").equals(msgUpper)
+              || ("QUEM_E_MESTRE_PARTICAO_" + p).equals(msgUpper)
+              || msgUpper.contains("PARTICAO_" + p)
+              || msgUpper.contains("PARTICAO " + p)
+              || msgUpper.contains("SHARD_" + p)
+              || msgUpper.contains("SHARD " + p)) {
+
+            int shardAlvo = p - 1;
+            boolean souLiderDesteShard = (idShard == shardAlvo && "ATIVO".equalsIgnoreCase(papel));
+            
+            // Se eu sou o lider deste Shard, respondo imediatamente!
+            // Se eu nao sou, mas estou na porta canonica 8888 e sou ATIVO, atuamos como Gateway / Proxy Transparente
+            // para que o cliente nao fique orfao (Anycast logico).
+            boolean deveResponder = souLiderDesteShard || ("ATIVO".equalsIgnoreCase(papel) && porta == Protocolo.PORTA_DISCOVERY);
+
+            if (deveResponder) {
+              String resposta = "MESTRE_PARTICAO_" + p;
+              byte[] dadosResposta = resposta.getBytes(StandardCharsets.UTF_8);
+              DatagramPacket pacoteResposta = new DatagramPacket(dadosResposta, dadosResposta.length,
+                  pacoteRecebido.getAddress(), pacoteRecebido.getPort());
+              socket.send(pacoteResposta);
+              System.out.println("[DISCOVERY:" + porta + "] Respondeu ao cliente " + pacoteRecebido.getAddress().getHostAddress()
+                  + " para particao " + p + " -> " + resposta + (souLiderDesteShard ? " (LIDER DIRETO)" : " (GATEWAY PROXY)"));
+            }
+            break;
+          }
         }
       }
     } catch (Exception e) {

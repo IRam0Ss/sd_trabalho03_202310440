@@ -385,7 +385,6 @@ public class AtendimentoCliente implements Runnable {
       case Protocolo.LEAVE:
         String grupoLeave = apdu.getNomeGrupo();
         if (grupoLeave != null && !grupoLeave.equalsIgnoreCase("GLOBAL")) {
-          this.gruposDaSessao.removeIf(g -> g.equalsIgnoreCase(grupoLeave.trim()));
           int shardLeave = Particionador.shardDe(grupoLeave);
           if (this.roteador != null) {
             ClusterLog.info("PROXY:TCP", String.format("Roteando LEAVE de '%s' no grupo '%s' -> %s",
@@ -393,6 +392,10 @@ public class AtendimentoCliente implements Runnable {
           }
           Operacao opLeave = Operacao.sairGrupo(apdu.getIdRequisicao(), grupoLeave, apdu.getNomeUsuario());
           Resultado resLeave = executarNoShard(shardLeave, opLeave);
+          if (resLeave.isSucesso()
+              || (resLeave.getMensagem() != null && !resLeave.getMensagem().contains("indisponivel"))) {
+            this.gruposDaSessao.removeIf(g -> g.equalsIgnoreCase(grupoLeave.trim()));
+          }
           enviarResposta(resLeave.getOperacaoRetorno(), resLeave.getMensagem());
           System.out.println("[ATENDIMENTO] [INFO] Processamento de LEAVE de '" + apdu.getNomeUsuario() + "' concluido.");
         } else {

@@ -75,10 +75,13 @@ public class RoteadorShards {
     void entregar(APDU apdu, String ipCliente, int portaUdpCliente, int saltos);
   }
 
+  /** Timeout seguro para redes Wi-Fi em operacoes de escrita inter-shard ROTEAR_OP (3000ms). */
   public static final long TIMEOUT_PADRAO_MS = 3000;
-  /** Timeout curto (2s) para scatter-gather resiliente de LIST e USERS (Teorema CAP: disponibilidade parcial). */
-  public static final long TIMEOUT_SCATTER_MS = 2000;
+  /** Timeout seguro para redes Wi-Fi em CONSULTA_GLOBAL / Scatter-Gather de LIST, USERS e MEMBERS (2500ms). */
+  public static final long TIMEOUT_SCATTER_MS = 2500;
   private static final long TIMEOUT_TENTATIVA_MS = 1200;
+  private static final int CONNECT_TIMEOUT_INTERSHARD_MS = 650;
+  private static final long TIMEOUT_SONDA_AMNESIA_MS = 1000;
   private static final String TAG = "ROTEAMENTO";
 
   private final ConfigCluster config;
@@ -109,6 +112,7 @@ public class RoteadorShards {
   private final Boolean[] shardOnline = new Boolean[Particionador.NUM_SHARDS];
   private final long inicioMs = System.currentTimeMillis();
   private volatile boolean executando = true;
+  private long contadorCiclosAnuncio = 0;
   private volatile ReceptorUdpRoteado receptorUdp = null;
   private final Set<String> pacotesUdpVistos = Collections.synchronizedSet(
       Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(512, 0.75f, true) {
@@ -152,7 +156,8 @@ public class RoteadorShards {
     this.gerenciador = gerenciador;
     this.ctx = ctx;
     this.meuShard = config.getIdShard();
-    this.totalReplicas = Math.max(2, config.getNos().size());
+    // Replicas sondadas por shard (IDs s, s+3, s+6, ...). Nos alem disso sao aprendidos pelos anuncios.
+    this.totalReplicas = Math.max(4, config.getNos().size() + 1);
     this.host = config.getMeuNoInfo().host;
   }
 
@@ -200,19 +205,44 @@ public class RoteadorShards {
   private void atualizarProprioShard() {
     int lider = "ATIVO".equalsIgnoreCase(ctx.papel()) ? config.getMeuId() : ctx.idLiderAtivo();
     if (lider > 0) {
-      tabela.definirProprio(meuShard, lider, ctx.epoca());
+      String hostLiderLocal = host;
+      ConfigCluster.NoInfo infoLider = config.getNos().get(lider);
+      if (infoLider != null && infoLider.host != null && !infoLider.host.isEmpty()) {
+        hostLiderLocal = infoLider.host;
+      }
+      tabela.definirProprio(meuShard, lider, ctx.epoca(), hostLiderLocal);
     } else {
       tabela.invalidar(meuShard, tabela.getLider(meuShard));
     }
   }
 
   private void anunciar() {
-    AnuncioShard a = new AnuncioShard(meuShard, config.getMeuId(), ctx.papel(), ctx.epoca(), ctx.idLiderAtivo());
+    AnuncioShard a = new AnuncioShard(meuShard, config.getMeuId(), ctx.papel(), ctx.epoca(), ctx.idLiderAtivo(), host);
     for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
       if (s == meuShard) continue;
       for (int r = 0; r < totalReplicas; r++) {
-        enviar(s, r + 1, criarMsg(TipoMensagemCluster.ANUNCIO_SHARD, a));
+        enviar(s, PortasShard.idDoNo(s, r), criarMsg(TipoMensagemCluster.ANUNCIO_SHARD, a));
       }
+    }
+    // A cada 2 ciclos (~2s), emite anuncio UDP broadcast leve na LAN para descoberta cross-machine entre shards
+    if ((contadorCiclosAnuncio++ % 2) == 0) {
+      BeaconClusterLAN.dispararAnuncioShardLAN(
+          meuShard, config.getIdReplica(), config.getMeuId(), ctx.papel(), ctx.epoca(), ctx.idLiderAtivo(),
+          host, totalReplicas);
+    }
+  }
+
+  /** Registra anuncio de outro shard recebido via farol UDP broadcast na LAN fisica. */
+  public void registrarAnuncioExternoLAN(
+      int idShard, int idNo, String papel, long epoca, int idLiderConhecido, String hostRemoto) {
+    if (idShard < 0 || idShard >= Particionador.NUM_SHARDS || idShard == meuShard) {
+      return;
+    }
+    tabela.registrarHostReplica(idShard, idNo, hostRemoto);
+    if ("ATIVO".equalsIgnoreCase(papel)) {
+      tabela.registrarAtivo(idShard, idNo, epoca, hostRemoto);
+    } else if (idLiderConhecido > 0) {
+      tabela.sugerir(idShard, idLiderConhecido, hostRemoto);
     }
   }
 
@@ -226,14 +256,14 @@ public class RoteadorShards {
       if (shardOnline[s] == null) {
         shardOnline[s] = online;
         if (online) {
-          ClusterLog.info(TAG, "Shard " + Particionador.nome(s) + " ONLINE. Lider: replica " + (tabela.getLider(s) - 1)
-              + " (TCP=" + PortasShard.tcp(s, tabela.getLider(s) - 1)
-              + ", Cluster=" + PortasShard.cluster(s, tabela.getLider(s) - 1) + ").");
+          ClusterLog.info(TAG, "Shard " + Particionador.nome(s) + " ONLINE. Lider: No " + tabela.getLider(s)
+              + " (TCP=" + PortasShard.tcpDoNo(tabela.getLider(s))
+              + ", Cluster=" + PortasShard.clusterDoNo(tabela.getLider(s)) + ").");
         }
       } else if (online != shardOnline[s].booleanValue()) {
         shardOnline[s] = online;
         if (online) {
-          ClusterLog.info(TAG, "Shard " + Particionador.nome(s) + " ONLINE. Lider: replica " + (tabela.getLider(s) - 1)
+          ClusterLog.info(TAG, "Shard " + Particionador.nome(s) + " ONLINE. Lider: No " + tabela.getLider(s)
               + " (ROTEADO com sucesso para este shard a partir de agora).");
         } else {
           ClusterLog.aviso(TAG, "Shard " + Particionador.nome(s) + " INDISPONIVEL: nenhum lider alcancavel. "
@@ -245,16 +275,27 @@ public class RoteadorShards {
 
   /** Imprime a tabela de lideres no console (comando 'lideres'). */
   public void imprimirTabela() {
-    System.out.println("=== TABELA DE LIDERES POR SHARD (visao deste no) ===");
-    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
-      int l = tabela.getLider(s);
-      String desc = (l > 0)
-          ? "replica " + (l - 1) + " | TCP " + PortasShard.tcp(s, l - 1) + " | cluster " + PortasShard.cluster(s, l - 1)
-              + " | epoca " + tabela.getEpoca(s)
-          : "SEM LIDER ALCANCAVEL (indisponivel)";
-      System.out.println("  " + Particionador.nome(s) + (s == meuShard ? " (meu shard)" : "") + " -> " + desc);
+    ClusterLog.exibirTabelaLideresANSI(meuShard, host, tabela);
+  }
+
+  public String getMeuHost() {
+    return host;
+  }
+
+  private String resolverHostRetorno(int shardDestino) {
+    String hostAlvo = tabela.getHostLider(shardDestino, host);
+    if ("127.0.0.1".equals(host) && hostAlvo != null && !"127.0.0.1".equals(hostAlvo)) {
+      return BeaconClusterLAN.obterIpLocalLAN();
     }
-    System.out.println("====================================================");
+    return host;
+  }
+
+  private static String resolverHostRespostaPedido(String hostRespostaPayload, String hostOrigemSocket) {
+    if ("127.0.0.1".equals(hostRespostaPayload)
+        && hostOrigemSocket != null && !hostOrigemSocket.isEmpty() && !"127.0.0.1".equals(hostOrigemSocket)) {
+      return hostOrigemSocket;
+    }
+    return hostRespostaPayload;
   }
 
   // =========================================================================
@@ -272,7 +313,8 @@ public class RoteadorShards {
   }
 
   private boolean enviar(int shard, int idNo, MensagemCluster msg) {
-    return enviarPara(host, PortasShard.cluster(shard, idNo - 1), msg);
+    String hostDestino = tabela.getHostReplica(shard, idNo, host);
+    return enviarPara(hostDestino, PortasShard.clusterDoNo(idNo), msg);
   }
 
   private boolean enviarPara(String h, int porta, MensagemCluster msg) {
@@ -283,7 +325,7 @@ public class RoteadorShards {
         if (c.socket == null || c.socket.isClosed()) {
           Socket s = new Socket();
           s.setTcpNoDelay(true);
-          s.connect(new InetSocketAddress(h, porta), 300);
+          s.connect(new InetSocketAddress(h, porta), CONNECT_TIMEOUT_INTERSHARD_MS);
           c.socket = s;
           c.oos = new ObjectOutputStream(s.getOutputStream());
           c.oos.flush();
@@ -302,16 +344,17 @@ public class RoteadorShards {
   /** Ponto de entrada de mensagens inter-shard vindas do CanalCluster (ANUNCIO_SHARD, ROTEAR_OP, RESP_OP). */
   public void receber(MensagemCluster msg) {
     if (msg == null || !executando) return;
+    final String hostSocket = msg.getHostOrigem();
     switch (msg.getTipo()) {
       case ANUNCIO_SHARD:
         if (msg.getPayload() instanceof AnuncioShard) {
-          processarAnuncio((AnuncioShard) msg.getPayload());
+          processarAnuncio((AnuncioShard) msg.getPayload(), hostSocket);
         }
         break;
       case ROTEAR_OP:
         if (msg.getPayload() instanceof PedidoRoteado) {
           final PedidoRoteado p = (PedidoRoteado) msg.getPayload();
-          pool.submit(() -> tratarPedido(p));
+          pool.submit(() -> tratarPedido(p, hostSocket));
         }
         break;
       case RESP_OP:
@@ -326,7 +369,7 @@ public class RoteadorShards {
       case CONSULTA_SHARD:
         if (msg.getPayload() instanceof PedidoConsulta) {
           final PedidoConsulta pc = (PedidoConsulta) msg.getPayload();
-          pool.submit(() -> tratarConsulta(pc));
+          pool.submit(() -> tratarConsulta(pc, hostSocket));
         }
         break;
       case RESP_CONSULTA_SHARD:
@@ -355,12 +398,18 @@ public class RoteadorShards {
     }
   }
 
-  private void processarAnuncio(AnuncioShard a) {
+  private void processarAnuncio(AnuncioShard a, String hostConexao) {
     if (a.idShard < 0 || a.idShard >= Particionador.NUM_SHARDS || a.idShard == meuShard) return;
+    String hostEfetivo = a.host;
+    if ((hostEfetivo == null || hostEfetivo.isEmpty() || "127.0.0.1".equals(hostEfetivo))
+        && hostConexao != null && !hostConexao.isEmpty() && !"127.0.0.1".equals(hostConexao)) {
+      hostEfetivo = hostConexao;
+    }
+    tabela.registrarHostReplica(a.idShard, a.idNo, hostEfetivo);
     if ("ATIVO".equalsIgnoreCase(a.papel)) {
-      tabela.registrarAtivo(a.idShard, a.idNo, a.epoca);
+      tabela.registrarAtivo(a.idShard, a.idNo, a.epoca, hostEfetivo);
     } else if (a.idLiderConhecido > 0) {
-      tabela.sugerir(a.idShard, a.idLiderConhecido);
+      tabela.sugerir(a.idShard, a.idLiderConhecido, hostEfetivo);
     }
   }
 
@@ -368,7 +417,7 @@ public class RoteadorShards {
   // LADO DESTINO: executar pedido recebido
   // =========================================================================
 
-  private void tratarPedido(PedidoRoteado p) {
+  private void tratarPedido(PedidoRoteado p, String hostOrigemSocket) {
     RespostaRoteada resp;
     String tipoOp = (p.operacao != null) ? String.valueOf(p.operacao.getTipo()) : "?";
 
@@ -381,15 +430,15 @@ public class RoteadorShards {
       boolean conhece = lider > 0 && lider != config.getMeuId();
       resp = new RespostaRoteada(p.idCorrelacao, conhece ? Status.REDIRECIONAR : Status.NAO_ATIVO, null,
           conhece ? lider : -1, null);
-      ClusterLog.info(TAG, "Pedido " + tipoOp + " de S" + p.shardOrigem + "/R" + (p.idNoOrigem - 1)
-          + " recebido, mas sou " + ctx.papel() + ". Redirecionando para lider " + (conhece ? "replica " + (lider - 1) : "(desconhecido)"));
+      ClusterLog.info(TAG, "Pedido " + tipoOp + " de S" + p.shardOrigem + "/No" + p.idNoOrigem
+          + " recebido, mas sou " + ctx.papel() + ". Redirecionando para lider " + (conhece ? "No " + lider : "(desconhecido)"));
     } else {
       Resultado res = dedup.get(p.idCorrelacao);
       if (res != null) {
         ClusterLog.info(TAG, "Pedido " + tipoOp + " [" + p.idCorrelacao.substring(0, 8)
             + "] repetido (retry): devolvendo resultado guardado, sem reexecutar.");
       } else {
-        ClusterLog.info(TAG, "Operacao roteada " + tipoOp + " de S" + p.shardOrigem + "/R" + (p.idNoOrigem - 1)
+        ClusterLog.info(TAG, "Operacao roteada " + tipoOp + " de S" + p.shardOrigem + "/No" + p.idNoOrigem
             + " [" + p.idCorrelacao.substring(0, 8) + "] sendo aplicada e replicada neste shard...");
         res = gerenciador.aplicar(p.operacao);
         dedup.put(p.idCorrelacao, res);
@@ -398,9 +447,10 @@ public class RoteadorShards {
       resp = new RespostaRoteada(p.idCorrelacao, Status.OK, res, config.getMeuId(), null);
     }
 
-    boolean ok = enviarPara(p.hostResposta, p.portaResposta, criarMsg(TipoMensagemCluster.RESP_OP, resp));
+    String hostRespEfetivo = resolverHostRespostaPedido(p.hostResposta, hostOrigemSocket);
+    boolean ok = enviarPara(hostRespEfetivo, p.portaResposta, criarMsg(TipoMensagemCluster.RESP_OP, resp));
     if (!ok) {
-      ClusterLog.aviso(TAG, "Nao foi possivel entregar RESP_OP ao no de origem (" + p.hostResposta + ":" + p.portaResposta + ").");
+      ClusterLog.aviso(TAG, "Nao foi possivel entregar RESP_OP ao no de origem (" + hostRespEfetivo + ":" + p.portaResposta + ").");
     }
   }
 
@@ -414,8 +464,8 @@ public class RoteadorShards {
 
   /**
    * Executa uma operacao no lider do shard dono, de forma transparente.
-   * 
-   * @return Resultado do lider ou Resultado.erro("Particao ... indisponivel") se o shard nao responde.
+   * Em caso de queda total da particao (Ativo + Standby offline), degrada graciosamente sem travar
+   * o no de entrada, retornando mensagem limpa "Particao Sx [faixa] indisponivel no momento".
    */
   public Resultado executar(int shardDestino, Operacao op, long timeoutMs) {
     Particionador.validarShard(shardDestino);
@@ -432,9 +482,12 @@ public class RoteadorShards {
     final String curto = corr.substring(0, 8);
     final long limite = System.currentTimeMillis() + timeoutMs;
     final Set<Integer> tentados = new HashSet<>();
-    final PedidoRoteado pedido = new PedidoRoteado(corr, shardDestino, op, host, config.getMeuNoInfo().portaCluster,
-        meuShard, config.getMeuId());
+    final String hostRetorno = resolverHostRetorno(shardDestino);
+    final PedidoRoteado pedido = new PedidoRoteado(corr, shardDestino, op, hostRetorno,
+        config.getMeuNoInfo().portaCluster, meuShard, config.getMeuId());
     final long t0 = System.currentTimeMillis();
+    int rodadasConexaoFalha = 0;
+    boolean algumNoVivo = false;
 
     try {
       while (System.currentTimeMillis() < limite && executando) {
@@ -443,30 +496,40 @@ public class RoteadorShards {
           alvo = proximoCandidato(shardDestino, tentados);
         }
         if (alvo <= 0) {
+          if (!algumNoVivo) {
+            rodadasConexaoFalha++;
+            // Se TODAS as replicas recusaram conexao TCP em 2 rodadas consecutivas, a particao inteira caiu
+            if (rodadasConexaoFalha >= 2) {
+              break;
+            }
+          }
+          algumNoVivo = false;
           tentados.clear();
-          Thread.sleep(150);
+          Thread.sleep(180);
           continue;
         }
 
         CompletableFuture<RespostaRoteada> f = new CompletableFuture<>();
         pendentes.put(corr, f);
+        String hostAlvo = tabela.getHostReplica(shardDestino, alvo, host);
         ClusterLog.info(TAG, "Roteando " + op.getTipo() + " [" + curto + "] para " + Particionador.nome(shardDestino)
-            + " -> replica " + (alvo - 1) + " (porta cluster " + PortasShard.cluster(shardDestino, alvo - 1) + ")");
+            + " -> No " + alvo + " (" + hostAlvo + ":" + PortasShard.clusterDoNo(alvo) + ")");
 
         boolean enviado = enviar(shardDestino, alvo, criarMsg(TipoMensagemCluster.ROTEAR_OP, pedido));
         if (!enviado) {
-          ClusterLog.aviso(TAG, "Replica " + (alvo - 1) + " do " + Particionador.nome(shardDestino) + " inacessivel. Tentando outra...");
+          ClusterLog.aviso(TAG, "No " + alvo + " do " + Particionador.nome(shardDestino) + " inacessivel. Tentando outra...");
           tentados.add(alvo);
           tabela.invalidar(shardDestino, alvo);
           continue;
         }
+        algumNoVivo = true;
 
         RespostaRoteada r;
         try {
           long espera = Math.min(TIMEOUT_TENTATIVA_MS, Math.max(50, limite - System.currentTimeMillis()));
           r = f.get(espera, TimeUnit.MILLISECONDS);
         } catch (java.util.concurrent.TimeoutException | java.util.concurrent.ExecutionException te) {
-          ClusterLog.aviso(TAG, "Timeout aguardando replica " + (alvo - 1) + " do " + Particionador.nome(shardDestino) + " [" + curto + "]. Retry idempotente...");
+          ClusterLog.aviso(TAG, "Timeout aguardando No " + alvo + " do " + Particionador.nome(shardDestino) + " [" + curto + "]. Retry idempotente...");
           tentados.add(alvo);
           tabela.invalidar(shardDestino, alvo);
           continue;
@@ -482,7 +545,7 @@ public class RoteadorShards {
             tentados.add(alvo);
             tabela.invalidar(shardDestino, alvo);
             tabela.sugerir(shardDestino, r.idLider);
-            ClusterLog.info(TAG, "Replica " + (alvo - 1) + " nao e lider; redirecionado para replica " + (r.idLider - 1) + ".");
+            ClusterLog.info(TAG, "No " + alvo + " nao e lider; redirecionado para No " + r.idLider + ".");
             break;
           case NAO_ATIVO:
             tentados.add(alvo);
@@ -505,7 +568,8 @@ public class RoteadorShards {
   }
 
   private int proximoCandidato(int shard, Set<Integer> tentados) {
-    for (int id = 1; id <= totalReplicas; id++) {
+    for (int r = 0; r < totalReplicas; r++) {
+      int id = PortasShard.idDoNo(shard, r);
       if (!tentados.contains(id) && !(shard == meuShard && id == config.getMeuId())) {
         return id;
       }
@@ -560,7 +624,7 @@ public class RoteadorShards {
     return new RespostaConsulta(idCorrelacao, Status.OK, config.getMeuId(), null, null, null, valida, motivo);
   }
 
-  private void tratarConsulta(PedidoConsulta pc) {
+  private void tratarConsulta(PedidoConsulta pc, String hostOrigemSocket) {
     RespostaConsulta resp;
     if (pc == null || pc.shardDestino != meuShard) {
       resp = new RespostaConsulta(pc != null ? pc.idCorrelacao : "", Status.ERRO, -1, null, null,
@@ -590,7 +654,10 @@ public class RoteadorShards {
       }
       resp = new RespostaConsulta(pc.idCorrelacao, Status.OK, config.getMeuId(), grupos, usuarios, null);
     }
-    enviarPara(pc.hostResposta, pc.portaResposta, criarMsg(TipoMensagemCluster.RESP_CONSULTA_SHARD, resp));
+    if (pc != null) {
+      String hostRespEfetivo = resolverHostRespostaPedido(pc.hostResposta, hostOrigemSocket);
+      enviarPara(hostRespEfetivo, pc.portaResposta, criarMsg(TipoMensagemCluster.RESP_CONSULTA_SHARD, resp));
+    }
   }
 
   /**
@@ -625,12 +692,13 @@ public class RoteadorShards {
     final String corr = UUID.randomUUID().toString();
     final long limite = System.currentTimeMillis() + timeoutMs;
     final Set<Integer> tentados = new HashSet<>();
-    final int maxRodadasFalha = (timeoutMs <= 700) ? 1 : 2;
+    final int maxRodadasFalha = (timeoutMs <= 1100) ? 1 : 2;
     int rodadasConexaoFalha = 0;
     boolean algumNoVivo = false;
+    final String hostRetorno = resolverHostRetorno(shardDestino);
 
     final PedidoConsulta pedido = new PedidoConsulta(corr, shardDestino, tipo, parametro, gruposEsperados,
-        host, config.getMeuNoInfo().portaCluster, meuShard, config.getMeuId());
+        hostRetorno, config.getMeuNoInfo().portaCluster, meuShard, config.getMeuId());
 
     try {
       while (System.currentTimeMillis() < limite && executando) {
@@ -935,7 +1003,8 @@ public class RoteadorShards {
         tabela.invalidar(shardDestino, liderConhecido);
       }
 
-      for (int id = 1; id <= totalReplicas; id++) {
+      for (int r = 0; r < totalReplicas; r++) {
+        int id = PortasShard.idDoNo(shardDestino, r);
         if (tentados.contains(id)) continue;
         if (shardDestino == meuShard && id == config.getMeuId()) continue;
         if (enviar(shardDestino, id, criarMsg(TipoMensagemCluster.ENCAMINHAR_UDP, pkt))) {
@@ -1006,7 +1075,7 @@ public class RoteadorShards {
       int shardAlvo = entry.getKey();
       ArrayList<String> gruposNoShard = entry.getValue();
       RespostaConsulta rc = consultarShard(
-          shardAlvo, TipoConsulta.VERIFICAR_SESSAO_USUARIO, nomeTrim, gruposNoShard, 550);
+          shardAlvo, TipoConsulta.VERIFICAR_SESSAO_USUARIO, nomeTrim, gruposNoShard, TIMEOUT_SONDA_AMNESIA_MS);
       if (rc != null && rc.status == Status.OK && !rc.sessaoValida) {
         return (rc.motivoInvalidez != null)
             ? rc.motivoInvalidez
@@ -1056,7 +1125,7 @@ public class RoteadorShards {
           continue;
         }
         for (int r = 0; r < totalReplicas; r++) {
-          enviar(s, r + 1, msg);
+          enviar(s, PortasShard.idDoNo(s, r), msg);
         }
       }
     });

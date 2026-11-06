@@ -88,12 +88,12 @@ public class Servidor {
     servicosUDP.clear();
     servicosDiscovery.clear();
 
-    // 1. Servico TCP principal (5000 + idShard*100 + idReplica)
+    // 1. Servico TCP principal (5000 + ID)
     ServidorTCP tcpPrincipal = new ServidorTCP(portaTcp, gerenciador, roteador);
     servicosTCP.add(tcpPrincipal);
     new Thread(tcpPrincipal, "Thread-ServidorTCP-" + portaTcp).start();
 
-    // 2. Servico UDP principal (6000 + idShard*100 + idReplica)
+    // 2. Servico UDP principal (6000 + ID)
     final ServidorUDP udpPrincipal = new ServidorUDP(portaUdp, gerenciador, roteador);
     servicosUDP.add(udpPrincipal);
     new Thread(udpPrincipal, "Thread-ServidorUDP-" + portaUdp).start();
@@ -127,8 +127,8 @@ public class Servidor {
 
     // 4. Portas legadas para compatibilidade T#01/T#02 (ativas no lider do Shard 0)
     if (incluirLegado) {
-      // Se portaTcp ja e 5000 (Shard 0, Replica 0), nao duplica o bind TCP 5000;
-      // se houve failover para Replica 1 (portaTcp=5001), assume tambem o TCP 5000!
+      // O lider do Shard 0 assume tambem o TCP legado 5000 (clientes T#01/T#02 de colegas);
+      // em failover, o novo lider do S0 reabre a 5000.
       if (portaTcp != Protocolo.PORTA_SERVIDOR_LEGACY) {
         try {
           ServidorTCP tcpLegado = new ServidorTCP(Protocolo.PORTA_SERVIDOR_LEGACY, gerenciador, roteador);
@@ -149,17 +149,18 @@ public class Servidor {
         } catch (Exception ignored) {
         }
       }
+    }
 
-      // Discovery legado EDEN na porta UDP 5001: SEMPRE aberto no Shard 0 (mesmo com portaTcp == 5000!)
-      if (portaDiscovery != Protocolo.PORTA_DISCOVERY_EDEN) {
-        try {
-          ServidorDiscovery discEden = new ServidorDiscovery(Protocolo.PORTA_DISCOVERY_EDEN);
-          discEden.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
-          servicosDiscovery.add(discEden);
-          new Thread(discEden, "Thread-ServidorDiscovery-Eden-5001").start();
-          discovery5001Aberto = true;
-        } catch (Exception ignored) {
-        }
+    // 5. Discovery universal EDEN na porta UDP 5001: aberto por TODO lider de shard (SO_REUSEADDR),
+    //    assim qualquer cliente "burro" encontra algum lider via broadcast mesmo se o Shard 0 cair.
+    if (portaDiscovery != Protocolo.PORTA_DISCOVERY_EDEN) {
+      try {
+        ServidorDiscovery discEden = new ServidorDiscovery(Protocolo.PORTA_DISCOVERY_EDEN);
+        discEden.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
+        servicosDiscovery.add(discEden);
+        new Thread(discEden, "Thread-ServidorDiscovery-Eden-5001").start();
+        discovery5001Aberto = true;
+      } catch (Exception ignored) {
       }
     }
 

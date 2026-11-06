@@ -243,7 +243,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
       try {
         int meuId = config.getMeuId();
         // Escalonamento deterministico por ID para evitar tempestades concorrentes de eleicao
-        int delayMs = Math.max(0, (meuId - 1) * 80);
+        int delayMs = PortasShard.replicaDoNo(meuId) * 80;
         if (delayMs > 0) {
           Thread.sleep(delayMs);
         }
@@ -456,10 +456,10 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     // Garante que novos nos descobertos dinamicamente sejam registrados
     if (msg.getIdOrigem() > 0 && msg.getIdOrigem() != config.getMeuId()) {
       String hostOrig = (msg.getHostOrigem() != null && !msg.getHostOrigem().isEmpty()) ? msg.getHostOrigem() : "127.0.0.1";
-      int idxRep = msg.getIdOrigem() - 1;
-      int pCluster = (msg.getPortaClusterOrigem() > 0) ? msg.getPortaClusterOrigem() : PortasShard.cluster(config.getIdShard(), idxRep);
-      int pTcp = (msg.getPortaTcpServico() > 0) ? msg.getPortaTcpServico() : PortasShard.tcp(config.getIdShard(), idxRep);
-      int pUdp = (msg.getPortaUdpServico() > 0) ? msg.getPortaUdpServico() : PortasShard.udp(config.getIdShard(), idxRep);
+      int idxRep = PortasShard.replicaDoNo(msg.getIdOrigem());
+      int pCluster = (msg.getPortaClusterOrigem() > 0) ? msg.getPortaClusterOrigem() : PortasShard.clusterDoNo(msg.getIdOrigem());
+      int pTcp = (msg.getPortaTcpServico() > 0) ? msg.getPortaTcpServico() : PortasShard.tcpDoNo(msg.getIdOrigem());
+      int pUdp = (msg.getPortaUdpServico() > 0) ? msg.getPortaUdpServico() : PortasShard.udpDoNo(msg.getIdOrigem());
 
       ConfigCluster.NoInfo infoPar = new ConfigCluster.NoInfo(
           msg.getIdOrigem(), config.getIdShard(), idxRep, hostOrig, pCluster, pTcp, pUdp, Protocolo.PORTA_DISCOVERY

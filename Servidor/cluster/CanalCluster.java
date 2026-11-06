@@ -98,10 +98,16 @@ public class CanalCluster {
     // 1. Thread escuta conexoes de entrada dos pares
     Thread threadEntrada = new Thread(() -> {
       try {
-        serverSocket = new ServerSocket();
-        serverSocket.setReuseAddress(true);
-        serverSocket.bind(new InetSocketAddress(config.getMeuNoInfo().host, minhaPorta));
-        System.out.println("[CLUSTER:TCP] [INFO] Canal de cluster escutando na porta " + minhaPorta);
+        // Zero-Config: reaproveita a porta 7000+ID ja reservada durante a escolha automatica do ID
+        serverSocket = ConfigCluster.assumirReservaCluster(minhaPorta);
+        if (serverSocket == null) {
+          serverSocket = new ServerSocket();
+          serverSocket.setReuseAddress(true);
+          // Blindagem LAN (Fase 8): bind em 0.0.0.0 para aceitar conexoes locais (127.0.0.1) e fisicas (Wi-Fi/Ethernet)
+          serverSocket.bind(new InetSocketAddress(minhaPorta));
+        }
+        System.out.println("[CLUSTER:TCP] [INFO] Canal de cluster escutando em 0.0.0.0:" + minhaPorta
+            + " (host anunciado: " + config.getMeuNoInfo().host + ")");
 
         while (executando && !serverSocket.isClosed()) {
           try {
@@ -156,7 +162,7 @@ public class CanalCluster {
     try {
       Socket s = new Socket();
       s.setTcpNoDelay(true);
-      s.connect(new InetSocketAddress(saida.host, saida.porta), 600);
+      s.connect(new InetSocketAddress(saida.host, saida.porta), 1000);
 
       ObjectOutputStream oos = new ObjectOutputStream(s.getOutputStream());
       oos.flush();
@@ -244,7 +250,16 @@ public class CanalCluster {
             if (obj instanceof MensagemCluster) {
               MensagemCluster msg = (MensagemCluster) obj;
 
-              // Fase 3/4/5/6: trafego inter-shard nao participa do consenso; segue direto ao roteador
+              // Enriquecimento de IP real LAN: se o pacote veio de outra maquina fisica e trazia 127.0.0.1, corrige
+              if (socket.getInetAddress() != null && !socket.getInetAddress().isLoopbackAddress()) {
+                String ipSocketReal = socket.getInetAddress().getHostAddress();
+                if (msg.getHostOrigem() == null || msg.getHostOrigem().isEmpty()
+                    || "127.0.0.1".equals(msg.getHostOrigem()) || "0.0.0.0".equals(msg.getHostOrigem())) {
+                  msg.setHostOrigem(ipSocketReal);
+                }
+              }
+
+              // Fase 3/4/5/6/7: trafego inter-shard nao participa do consenso; segue direto ao roteador
               if (receptorInterShard != null && (msg.getTipo() == TipoMensagemCluster.ANUNCIO_SHARD
                   || msg.getTipo() == TipoMensagemCluster.ROTEAR_OP
                   || msg.getTipo() == TipoMensagemCluster.RESP_OP
@@ -271,14 +286,14 @@ public class CanalCluster {
                     : socket.getInetAddress().getHostAddress();
                 int pCluster = (msg.getPortaClusterOrigem() > 0)
                     ? msg.getPortaClusterOrigem()
-                    : PortasShard.cluster(config.getIdShard(), msg.getIdOrigem() - 1);
+                    : PortasShard.clusterDoNo(msg.getIdOrigem());
                 int pTcp = (msg.getPortaTcpServico() > 0) ? msg.getPortaTcpServico()
-                    : PortasShard.tcp(config.getIdShard(), msg.getIdOrigem() - 1);
+                    : PortasShard.tcpDoNo(msg.getIdOrigem());
                 int pUdp = (msg.getPortaUdpServico() > 0) ? msg.getPortaUdpServico()
-                    : PortasShard.udp(config.getIdShard(), msg.getIdOrigem() - 1);
+                    : PortasShard.udpDoNo(msg.getIdOrigem());
 
                 ConfigCluster.NoInfo infoPar = new ConfigCluster.NoInfo(
-                    msg.getIdOrigem(), config.getIdShard(), msg.getIdOrigem() - 1, hostOrig, pCluster, pTcp, pUdp,
+                    msg.getIdOrigem(), config.getIdShard(), PortasShard.replicaDoNo(msg.getIdOrigem()), hostOrig, pCluster, pTcp, pUdp,
                     Protocolo.PORTA_DISCOVERY
                 );
                 config.registrarParDinamico(infoPar);

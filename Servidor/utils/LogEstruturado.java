@@ -41,8 +41,23 @@ public final class LogEstruturado {
   private static volatile boolean cores = !"false".equalsIgnoreCase(System.getProperty("cores"))
       && System.getenv("NO_COLOR") == null;
   private static boolean instalado = false;
+  private static volatile PrintStream streamOriginalOut = System.out;
 
   private LogEstruturado() {
+  }
+
+  public static boolean isCoresAtivas() {
+    return cores;
+  }
+
+  /**
+   * Imprime um bloco multilinhas (ex.: dashboard ASCII colorido do console) diretamente no stream
+   * original sem adicionar o prefixo de log linha a linha.
+   */
+  public static synchronized void imprimirBlocoBruto(String bloco) {
+    PrintStream destino = (instalado && streamOriginalOut != null) ? streamOriginalOut : System.out;
+    destino.print(bloco);
+    destino.flush();
   }
 
   /** Instala o filtro (idempotente). Deve ser chamado o mais cedo possivel no main. */
@@ -54,6 +69,7 @@ public final class LogEstruturado {
     }
     PrintStream outOriginal = System.out;
     PrintStream errOriginal = System.err;
+    streamOriginalOut = outOriginal;
     try {
       System.setOut(new PrintStream(new FiltroLinhas(outOriginal, false), true, "UTF-8"));
       System.setErr(new PrintStream(new FiltroLinhas(errOriginal, true), true, "UTF-8"));

@@ -44,6 +44,10 @@ public class BeaconClusterLAN {
     /** Fase 4 (Ghost Client): disparado quando um no recebe broadcast UDP interno USUARIO_CAIU. */
     default void onUsuarioCaiu(String idEvento, String nomeUsuario) {
     }
+
+    /** Fase 8 (Rede Real LAN): disparado quando um shard externo anuncia seu lider/IP fisico via UDP. */
+    default void onAnuncioShardLAN(int idShard, int idNo, String papel, long epoca, int idLider, String host) {
+    }
   }
 
   private final int meuId;
@@ -56,7 +60,8 @@ public class BeaconClusterLAN {
   private volatile boolean executando = true;
   private DatagramSocket socketEscuta;
 
-  private static final int MAX_REPLICAS_BEACON = 6;
+  /** Replicas por shard alcancaveis pelo farol (portas 9876..9905 => ate 30 nos no total). */
+  private static final int MAX_REPLICAS_BEACON = 10;
 
   public static int portaBeaconDe(int idShard, int idReplica) {
     return Protocolo.PORTA_CLUSTER_BEACON + (idShard * 10) + idReplica;
@@ -99,25 +104,58 @@ public class BeaconClusterLAN {
     return broadcasts;
   }
 
+  private static boolean isInterfaceVirtual(String nomeInterface) {
+    if (nomeInterface == null) return false;
+    String n = nomeInterface.toLowerCase();
+    return n.startsWith("docker") || n.startsWith("br-") || n.startsWith("veth")
+        || n.startsWith("virbr") || n.startsWith("vboxnet") || n.startsWith("vmnet")
+        || n.startsWith("tun") || n.startsWith("tap") || n.startsWith("wg") || n.startsWith("tailscale");
+  }
+
+  private static String resolverHostRecebido(String hostPayload, InetAddress enderecoPacote) {
+    String ipPacote = (enderecoPacote != null) ? enderecoPacote.getHostAddress() : null;
+    if (hostPayload == null || hostPayload.trim().isEmpty()
+        || "0.0.0.0".equals(hostPayload.trim())
+        || ("127.0.0.1".equals(hostPayload.trim()) && enderecoPacote != null && !enderecoPacote.isLoopbackAddress())) {
+      return (ipPacote != null && !ipPacote.isEmpty()) ? ipPacote : "127.0.0.1";
+    }
+    return hostPayload.trim();
+  }
+
   /**
-   * Obtem o endereco IPv4 local prioritario da maquina na rede.
+   * Obtem o endereco IPv4 local prioritario da maquina na rede fisica (Wi-Fi / Ethernet),
+   * ignorando pontes virtuais (Docker, libvirt, VirtualBox, VPN) sempre que houver interface fisica ativa.
    */
   public static String obterIpLocalLAN() {
+    String melhorIp = null;
+    int melhorPontuacao = -1;
     try {
       Enumeration<NetworkInterface> interfaces = NetworkInterface.getNetworkInterfaces();
       while (interfaces.hasMoreElements()) {
         NetworkInterface netInterface = interfaces.nextElement();
-        if (netInterface.isLoopback() || !netInterface.isUp()) continue;
-        for (InterfaceAddress address : netInterface.getInterfaceAddresses()) {
-          InetAddress addr = address.getAddress();
-          if (addr instanceof java.net.Inet4Address && !addr.isLoopbackAddress()) {
-            return addr.getHostAddress();
+        if (netInterface.isLoopback() || !netInterface.isUp() || netInterface.isVirtual()) continue;
+        String nome = netInterface.getName() != null ? netInterface.getName().toLowerCase() : "";
+        boolean virtual = isInterfaceVirtual(nome);
+
+        for (InterfaceAddress ia : netInterface.getInterfaceAddresses()) {
+          InetAddress addr = ia.getAddress();
+          if (!(addr instanceof java.net.Inet4Address) || addr.isLoopbackAddress() || addr.isLinkLocalAddress()) {
+            continue;
+          }
+          int pontos = virtual ? 1 : 10;
+          if (ia.getBroadcast() != null) pontos += 5;
+          if (addr.isSiteLocalAddress()) pontos += 4;
+          if (nome.startsWith("wl") || nome.startsWith("eth") || nome.startsWith("en")) pontos += 6;
+
+          if (pontos > melhorPontuacao) {
+            melhorPontuacao = pontos;
+            melhorIp = addr.getHostAddress();
           }
         }
       }
     } catch (Exception ignored) {
     }
-    return "127.0.0.1";
+    return (melhorIp != null) ? melhorIp : "127.0.0.1";
   }
 
   /**
@@ -164,7 +202,7 @@ public class BeaconClusterLAN {
               int shardPar = Integer.parseInt(p[1]);
               int replicaPar = Integer.parseInt(p[2]);
               int idNoPar = Integer.parseInt(p[3]);
-              String host = p[4];
+              String host = resolverHostRecebido(p[4], resp.getAddress());
               int pCluster = Integer.parseInt(p[5]);
               int pTcp = Integer.parseInt(p[6]);
               int pUdp = Integer.parseInt(p[7]);
@@ -194,6 +232,66 @@ public class BeaconClusterLAN {
   }
 
   /**
+   * Sondagem GLOBAL (todos os shards) usada na inicializacao Zero-Config para descobrir quais IDs
+   * ja estao ocupados na rede, permitindo ao novo no escolher o menor ID livre.
+   * Envia {@code EDEN_ID_PROBE} para todas as portas de farol (3 shards x replicas) e coleta as
+   * respostas {@code EDEN_CLUSTER_PEER}, sem filtrar por shard.
+   *
+   * @return mapa ID global -> metadados de todos os nos vivos que responderam.
+   */
+  public static Map<Integer, ConfigCluster.NoInfo> sondarTodosOsNos(int janelaMs) {
+    Map<Integer, ConfigCluster.NoInfo> encontrados = new HashMap<>();
+    try (DatagramSocket socket = new DatagramSocket()) {
+      socket.setBroadcast(true);
+      socket.setSoTimeout(200);
+      byte[] dados = "EDEN_ID_PROBE".getBytes(StandardCharsets.UTF_8);
+
+      List<InetAddress> bcasts = coletarBroadcasts();
+      for (int shard = 0; shard < Particionador.NUM_SHARDS; shard++) {
+        for (int rep = 0; rep < MAX_REPLICAS_BEACON; rep++) {
+          int portaAlvo = portaBeaconDe(shard, rep);
+          for (InetAddress bcast : bcasts) {
+            try {
+              socket.send(new DatagramPacket(dados, dados.length, bcast, portaAlvo));
+            } catch (Exception ignored) {
+            }
+          }
+        }
+      }
+
+      long limite = System.currentTimeMillis() + Math.max(300, janelaMs);
+      byte[] buffer = new byte[512];
+      while (System.currentTimeMillis() < limite) {
+        try {
+          DatagramPacket resp = new DatagramPacket(buffer, buffer.length);
+          socket.receive(resp);
+          String texto = new String(resp.getData(), 0, resp.getLength(), StandardCharsets.UTF_8).trim();
+          if (!texto.startsWith("EDEN_CLUSTER_PEER:")) {
+            continue;
+          }
+          // EDEN_CLUSTER_PEER:<idShard>:<idReplica>:<idNo>:<host>:<portaCluster>:<portaTcp>:<portaUdp>
+          String[] p = texto.split(":");
+          if (p.length < 8) {
+            continue;
+          }
+          int shardPar = Integer.parseInt(p[1]);
+          int replicaPar = Integer.parseInt(p[2]);
+          int idNoPar = Integer.parseInt(p[3]);
+          String host = resolverHostRecebido(p[4], resp.getAddress());
+          encontrados.put(idNoPar, new ConfigCluster.NoInfo(idNoPar, shardPar, replicaPar, host,
+              Integer.parseInt(p[5]), Integer.parseInt(p[6]), Integer.parseInt(p[7]), Protocolo.PORTA_DISCOVERY));
+        } catch (java.net.SocketTimeoutException ste) {
+          // continua ate o fim da janela
+        } catch (Exception ignored) {
+        }
+      }
+    } catch (Exception e) {
+      ClusterLog.aviso("BEACON", "Aviso durante sondagem global de IDs: " + e.getMessage());
+    }
+    return encontrados;
+  }
+
+  /**
    * Inicia o servico de escuta em segundo plano para responder apenas a pares do MESMO shard.
    */
   public void iniciar() {
@@ -212,7 +310,17 @@ public class BeaconClusterLAN {
             socketEscuta.receive(pacote);
             String texto = new String(pacote.getData(), 0, pacote.getLength(), StandardCharsets.UTF_8).trim();
 
-            if (texto.startsWith("EDEN_CLUSTER_PROBE:")) {
+            if ("EDEN_ID_PROBE".equals(texto)) {
+              // Sondagem global Zero-Config: qualquer no (de qualquer shard) informa seu ID ocupado
+              String hostAnunciado = "127.0.0.1".equals(meuInfo.host) && !pacote.getAddress().isLoopbackAddress()
+                  ? obterIpLocalLAN()
+                  : meuInfo.host;
+              String resposta = String.format("EDEN_CLUSTER_PEER:%d:%d:%d:%s:%d:%d:%d",
+                  meuShard, minhaReplica, meuId, hostAnunciado, meuInfo.portaCluster, meuInfo.portaTcp, meuInfo.portaUdp);
+              byte[] dResp = resposta.getBytes(StandardCharsets.UTF_8);
+              socketEscuta.send(new DatagramPacket(dResp, dResp.length, pacote.getAddress(), pacote.getPort()));
+
+            } else if (texto.startsWith("EDEN_CLUSTER_PROBE:")) {
               // EDEN_CLUSTER_PROBE:<idShard>:<idReplica>:<host>:<portaCluster>:<portaTcp>:<portaUdp>
               String[] p = texto.split(":");
               if (p.length >= 7) {
@@ -222,8 +330,11 @@ public class BeaconClusterLAN {
                   continue;
                 }
 
+                String hostAnunciado = "127.0.0.1".equals(meuInfo.host) && !pacote.getAddress().isLoopbackAddress()
+                    ? obterIpLocalLAN()
+                    : meuInfo.host;
                 String resposta = String.format("EDEN_CLUSTER_PEER:%d:%d:%d:%s:%d:%d:%d",
-                    meuShard, minhaReplica, meuId, meuInfo.host, meuInfo.portaCluster, meuInfo.portaTcp, meuInfo.portaUdp);
+                    meuShard, minhaReplica, meuId, hostAnunciado, meuInfo.portaCluster, meuInfo.portaTcp, meuInfo.portaUdp);
                 byte[] dResp = resposta.getBytes(StandardCharsets.UTF_8);
                 socketEscuta.send(new DatagramPacket(dResp, dResp.length, pacote.getAddress(), pacote.getPort()));
               }
@@ -235,7 +346,7 @@ public class BeaconClusterLAN {
                 int shardEntrou = Integer.parseInt(p[1]);
                 int replicaEntrou = Integer.parseInt(p[2]);
                 int idEntrou = Integer.parseInt(p[3]);
-                String hostEntrou = p[4];
+                String hostEntrou = resolverHostRecebido(p[4], pacote.getAddress());
                 int pCluster = Integer.parseInt(p[5]);
                 int pTcp = Integer.parseInt(p[6]);
                 int pUdp = Integer.parseInt(p[7]);
@@ -251,6 +362,21 @@ public class BeaconClusterLAN {
                   if (listener != null) {
                     listener.onNovoParDescoberto(novoNo);
                   }
+                }
+              }
+
+            } else if (texto.startsWith("EDEN_SHARD_LAN:")) {
+              // EDEN_SHARD_LAN:<idShard>:<idReplica>:<idNo>:<papel>:<epoca>:<idLider>:<host>
+              String[] p = texto.split(":");
+              if (p.length >= 8 && listener != null) {
+                int shardRemoto = Integer.parseInt(p[1]);
+                if (shardRemoto != meuShard && shardRemoto >= 0 && shardRemoto < Particionador.NUM_SHARDS) {
+                  int idNoRemoto = Integer.parseInt(p[3]);
+                  String papelRemoto = p[4];
+                  long epocaRemota = Long.parseLong(p[5]);
+                  int idLiderRemoto = Integer.parseInt(p[6]);
+                  String hostRemoto = resolverHostRecebido(p[7], pacote.getAddress());
+                  listener.onAnuncioShardLAN(shardRemoto, idNoRemoto, papelRemoto, epocaRemota, idLiderRemoto, hostRemoto);
                 }
               }
 
@@ -381,6 +507,44 @@ public class BeaconClusterLAN {
         ClusterLog.aviso("GHOST-CLIENT", "Falha ao enviar broadcast UDP USUARIO_CAIU: " + e.getMessage());
       }
     }, "Thread-Broadcast-UsuarioCaiu").start();
+  }
+
+  /**
+   * Anuncia via broadcast UDP o estado e o IP fisico deste no para os DEMAIS shards na LAN,
+   * permitindo que particoes rodando em maquinas fisicas diferentes descubram automaticamente seus IPs
+   * sem misturar os canais de consenso intra-shard.
+   */
+  public static void dispararAnuncioShardLAN(
+      int meuShard, int minhaReplica, int meuId, String papel, long epoca, int idLider, String meuHost, int totalReplicas) {
+    final String hostAnuncio = ("127.0.0.1".equals(meuHost) || meuHost == null || meuHost.isEmpty())
+        ? obterIpLocalLAN()
+        : meuHost;
+    final String msg = String.format("EDEN_SHARD_LAN:%d:%d:%d:%s:%d:%d:%s",
+        meuShard, minhaReplica, meuId, papel, epoca, idLider, hostAnuncio);
+    final byte[] dados = msg.getBytes(StandardCharsets.UTF_8);
+    final int maxRep = Math.min(MAX_REPLICAS_BEACON, Math.max(2, totalReplicas));
+
+    try (DatagramSocket s = new DatagramSocket()) {
+      s.setBroadcast(true);
+      List<InetAddress> bcasts = coletarBroadcasts();
+      for (int shard = 0; shard < Particionador.NUM_SHARDS; shard++) {
+        if (shard == meuShard) continue;
+        for (int rep = 0; rep < maxRep; rep++) {
+          int portaAlvo = portaBeaconDe(shard, rep);
+          for (InetAddress dest : bcasts) {
+            // Evita anunciar o IP LAN sobre loopback local se meuHost original era 127.0.0.1
+            if (dest.isLoopbackAddress() && "127.0.0.1".equals(meuHost)) {
+              continue;
+            }
+            try {
+              s.send(new DatagramPacket(dados, dados.length, dest, portaAlvo));
+            } catch (Exception ignored) {
+            }
+          }
+        }
+      }
+    } catch (Exception ignored) {
+    }
   }
 
   public void parar() {

@@ -95,15 +95,26 @@ public class NotificadorClientes {
 
     new Thread(() -> {
       try (DatagramSocket socketUDP = new DatagramSocket()) {
-        String payload = String.format("%s;%d;%d;%d;%d", novoIp, portaTcp, portaUdp, epoca, idNo);
-        APDU apdu = new APDU(Protocolo.SERVER_CHANGED, "GLOBAL", "SERVIDOR", payload, 0);
-        byte[] dados = serializarAPDU(apdu);
+        String ipLanReal = null;
 
         // Envia 3 rajadas com intervalo de 200ms para garantir recepcao
         for (int tentativa = 1; tentativa <= 3; tentativa++) {
           for (InfoUser u : lista) {
             try {
-              InetAddress ipDest = InetAddress.getByName(u.getIp());
+              String ipDestStr = u.getIp();
+              String ipAnunciado = novoIp;
+              if (("127.0.0.1".equals(novoIp) || "localhost".equalsIgnoreCase(novoIp))
+                  && ipDestStr != null && !ipDestStr.startsWith("127.")) {
+                if (ipLanReal == null) {
+                  ipLanReal = cluster.BeaconClusterLAN.obterIpLocalLAN();
+                }
+                ipAnunciado = ipLanReal;
+              }
+              String payload = String.format("%s;%d;%d;%d;%d", ipAnunciado, portaTcp, portaUdp, epoca, idNo);
+              APDU apdu = new APDU(Protocolo.SERVER_CHANGED, "GLOBAL", "SERVIDOR", payload, 0);
+              byte[] dados = serializarAPDU(apdu);
+
+              InetAddress ipDest = InetAddress.getByName(ipDestStr);
               DatagramPacket pacote = new DatagramPacket(dados, dados.length, ipDest, u.getPorta());
               socketUDP.send(pacote);
             } catch (Exception ignored) {

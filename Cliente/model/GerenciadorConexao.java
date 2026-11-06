@@ -139,7 +139,14 @@ public class GerenciadorConexao {
   }
 
   public static int inferirShardPorPortaTcp(int pTcp) {
-    if (pTcp >= 5000 && pTcp < 5300) {
+    if (pTcp > 5000 && pTcp < 5100) {
+      int id = pTcp - 5000;
+      return id % 3;
+    }
+    if (pTcp == Protocolo.PORTA_SERVIDOR_LEGACY) {
+      return 0;
+    }
+    if (pTcp >= 5100 && pTcp < 5300) {
       return (pTcp - 5000) / 100;
     }
     return -1;
@@ -223,13 +230,24 @@ public class GerenciadorConexao {
   }
 
   /**
-   * Executa o Discovery UDP automatico na rede local/loopback, extraindo o 6o campo (idShard)
-   * de cada lider que responder ao farol {@code DISCOVER_EDEN_CLUSTER}.
+   * Executa o Discovery UDP automatico na rede local/loopback.
    * 
    * @param timeoutTotalMs Tempo maximo total de escuta em milissegundos (ex: 900..1500ms).
    * @return Lista de servidores encontrados (lideres ATIVO primeiro).
    */
   public static List<EnderecoServidor> descobrirServidoresViaUDP(int timeoutTotalMs) {
+    return descobrirServidoresViaUDP(timeoutTotalMs, -1);
+  }
+
+  /**
+   * Executa o Discovery UDP com filtragem Smart Client: ignora qualquer shard diferente de {@code shardFiltro}.
+   * Se {@code shardFiltro < 0}, aceita lideres de qualquer shard.
+   * 
+   * @param timeoutTotalMs Tempo maximo de escuta.
+   * @param shardFiltro    ID do Shard desejado (0..2), ou -1 para qualquer.
+   * @return Lista de servidores filtrados correspondentes ao shard desejado.
+   */
+  public static List<EnderecoServidor> descobrirServidoresViaUDP(int timeoutTotalMs, int shardFiltro) {
     Map<String, EnderecoServidor> ativos = new LinkedHashMap<>();
     Map<String, EnderecoServidor> standbys = new LinkedHashMap<>();
 
@@ -248,8 +266,12 @@ public class GerenciadorConexao {
         enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY);
         enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY_EDEN);
         // Portas dedicadas de cada Shard ativo (8898, 8899, 8900) para evitar sombra SO_REUSEADDR em loopback
-        for (int s = 0; s < NUM_SHARDS; s++) {
-          enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY + 10 + s);
+        if (shardFiltro >= 0 && shardFiltro < NUM_SHARDS) {
+          enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY + 10 + shardFiltro);
+        } else {
+          for (int s = 0; s < NUM_SHARDS; s++) {
+            enviarPacoteSilencioso(socket, dadosCluster, dest, Protocolo.PORTA_DISCOVERY + 10 + s);
+          }
         }
         enviarPacoteSilencioso(socket, dadosPadrao, dest, Protocolo.PORTA_DISCOVERY);
         enviarPacoteSilencioso(socket, dadosEden, dest, Protocolo.PORTA_DISCOVERY_EDEN);
@@ -266,13 +288,18 @@ public class GerenciadorConexao {
 
           EnderecoServidor parsed = parseRespostaDiscoveryCluster(msg, remetenteIp);
           if (parsed != null) {
+            // Smart Client: ignora shards que nao sao o meu
+            if (shardFiltro >= 0 && parsed.idShard >= 0 && parsed.idShard != shardFiltro) {
+              continue;
+            }
             String chave = parsed.host.toLowerCase() + ":" + parsed.portaTcp;
             if ("ATIVO".equalsIgnoreCase(parsed.estado)) {
               if (!ativos.containsKey(chave)) {
-                System.out.println("[DISCOVERY] Farol recebido -> Host: " + parsed.host
+                String tagSmart = (shardFiltro >= 0) ? " [SMART-CLIENT:CONEXAO-DIRETA]" : "";
+                System.out.println("[DISCOVERY]" + tagSmart + " Farol recebido -> Host: " + parsed.host
                     + " | TCP: " + parsed.portaTcp + " | UDP: " + parsed.portaUdp
                     + " | Papel: " + parsed.estado
-                    + " | Shard de Entrada: " + (parsed.idShard >= 0 ? "S" + parsed.idShard : "N/A"));
+                    + " | Shard: S" + (parsed.idShard >= 0 ? parsed.idShard : "N/A"));
               }
               ativos.put(chave, parsed);
             } else {
@@ -466,7 +493,7 @@ public class GerenciadorConexao {
         while (!encontrou && executando && tentativasGerais < 30) {
           tentativasGerais++;
 
-          // 3. Dispara Discovery UDP automatico para encontrar qualquer lider de Shard vivo na rede
+          // 3. Discovery UDP Universal: aceita o lider de qualquer shard disponivel
           List<EnderecoServidor> descobertos = descobrirServidoresViaUDP(900);
           for (EnderecoServidor d : descobertos) {
             adicionarOuAtualizarServidor(d);

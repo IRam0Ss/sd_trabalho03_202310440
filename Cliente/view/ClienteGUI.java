@@ -332,25 +332,21 @@ public class ClienteGUI extends Application implements MessageListener {
   }
 
   private static String faixaShard(int idShard) {
-    if (idShard == 0) return "[A..I]";
-    if (idShard == 1) return "[J..R]";
-    if (idShard == 2) return "[S..Z]";
-    return "";
+    try {
+      return utils.Particionador.faixa(idShard);
+    } catch (Exception e) {
+      return "";
+    }
   }
 
   private static int shardDaChave(String chave) {
-    if (chave == null || chave.trim().isEmpty()) return 0;
-    char c = Character.toUpperCase(chave.trim().charAt(0));
-    if (c >= 'A' && c <= 'I') return 0;
-    if (c >= 'J' && c <= 'R') return 1;
-    if (c >= 'S' && c <= 'Z') return 2;
-    return 0;
+    return utils.Particionador.shardDe(chave);
   }
 
   private static String rotuloShardEntrada(int idShard, int pTcp) {
     int shardResolvido = (idShard >= 0) ? idShard : identificarShardPorPortaTcp(pTcp);
     if (shardResolvido >= 0) {
-      return "Shard S" + shardResolvido;
+      return utils.Particionador.nome(shardResolvido);
     }
     return "Cluster Central";
   }
@@ -358,8 +354,11 @@ public class ClienteGUI extends Application implements MessageListener {
   private void atualizarIndicadorConexao(String host, int pTcp, int idShard) {
     int shardResolvido = (idShard >= 0) ? idShard : identificarShardPorPortaTcp(pTcp);
     this.shardEntradaConectado = shardResolvido;
-    String nomeShard = rotuloShardEntrada(shardResolvido, pTcp);
-    String textoTopo = "Status: Conectado (Porta de Entrada: " + nomeShard + ")";
+
+    String shardNome = (shardResolvido >= 0)
+        ? utils.Particionador.nome(shardResolvido)
+        : ("Porta " + pTcp);
+    String textoTopo = "Status: Conectado (Porta de Entrada: " + shardNome + ")";
 
     if (pillShardRef != null) {
       pillShardRef.setStyle("");
@@ -368,7 +367,7 @@ public class ClienteGUI extends Application implements MessageListener {
       lblTopShardStatus.setText(textoTopo);
       lblTopShardStatus.setTextFill(Color.web("#c9d873"));
       lblTopShardStatus.setTooltip(new Tooltip(
-          textoTopo + " | Endpoint: " + host + ":" + pTcp + " (Proxy Transparente Inter-Shard Ativo)"));
+          textoTopo + " | Endpoint: " + host + ":" + pTcp + " | Roteamento Transparente"));
     }
     if (topStatusDot != null) {
       topStatusDot.setFill(Color.web("#c9d873"));
@@ -424,10 +423,10 @@ public class ClienteGUI extends Application implements MessageListener {
     txtIpServidor.setStyle(
         "-fx-background-color: rgba(35, 48, 15, 0.8); -fx-text-fill: #e5e8d7; -fx-prompt-text-fill: #8a9b3a; -fx-background-radius: 20px; -fx-border-color: #5b6623; -fx-border-radius: 20px; -fx-border-width: 1px; -fx-padding: 10px 16px; -fx-font-size: 13px;");
 
-    final Label lblClusterAlvo = new Label("\u25C9 Buscando lideres de Shard via Discovery UDP...");
+    final Label lblClusterAlvo = new Label("\u25C8 Localizando cluster via broadcast UDP...");
     lblClusterAlvo.getStyleClass().add("cluster-badge");
     lblClusterAlvo.setFont(Font.font("Consolas", FontWeight.BOLD, 12));
-    lblClusterAlvo.setTextFill(Color.web("#c9d873"));
+    lblClusterAlvo.setTextFill(Color.web("#8a9b3a"));
 
     final Button btnDiscover = new Button("Buscar");
     btnDiscover.getStyleClass().add("btn-eden");
@@ -437,11 +436,11 @@ public class ClienteGUI extends Application implements MessageListener {
     final java.util.function.Consumer<Boolean> dispararBuscaDiscovery = (autoConectarSeTiverNome) -> {
       btnDiscover.setText("Buscando...");
       btnDiscover.setDisable(true);
-      lblClusterAlvo.setText("\u25C9 Sondando rede via Discovery UDP (EDEN_CLUSTER)...");
+      lblClusterAlvo.setText("\u25C8 Sondando cluster via Discovery UDP broadcast...");
       lblClusterAlvo.setTextFill(Color.web("#c9d873"));
 
       new Thread(() -> {
-        List<EnderecoServidor> encontrados = GerenciadorConexao.descobrirServidoresViaUDP(1100);
+        List<EnderecoServidor> encontrados = GerenciadorConexao.descobrirServidoresViaUDP(1000);
         cacheDescobertos.clear();
         cacheDescobertos.addAll(encontrados);
 
@@ -450,23 +449,17 @@ public class ClienteGUI extends Application implements MessageListener {
           btnDiscover.setDisable(false);
 
           if (encontrados.isEmpty()) {
-            lblClusterAlvo.setText("\u26A0 Nenhum Shard detectado no momento (aguardando lideres)");
+            lblClusterAlvo.setText("\u26A0 Nenhum lider de cluster detectado no momento");
             lblClusterAlvo.setTextFill(Color.web("#e5a53a"));
           } else {
             EnderecoServidor lider = encontrados.get(0);
-            String nomeShard = rotuloShardEntrada(lider.idShard, lider.portaTcp);
-            lblClusterAlvo.setText("\u2713 Discovery UDP: Porta de Entrada " + nomeShard
-                + " (" + lider.host + ":" + lider.portaTcp + ")");
+            String nomeShard = (lider.idShard >= 0) ? utils.Particionador.nome(lider.idShard) : ("Porta " + lider.portaTcp);
+            lblClusterAlvo.setText("\u2713 Cluster localizado: " + nomeShard + " (" + lider.host + ":" + lider.portaTcp + ")");
             lblClusterAlvo.setTextFill(Color.web("#c9d873"));
-            txtIpServidor.clear(); // Mantem modo Discovery Automatico ativo
+            txtIpServidor.clear();
 
             if (Boolean.TRUE.equals(autoConectarSeTiverNome)) {
-              String codinome = txtUsername.getText();
-              if (codinome != null && !codinome.trim().isEmpty()) {
-                btnConfirmar.fire();
-              } else {
-                txtUsername.requestFocus();
-              }
+              btnConfirmar.fire();
             }
           }
         });
@@ -492,6 +485,8 @@ public class ClienteGUI extends Application implements MessageListener {
     btnConfirmar.setOnAction(e -> {
       String nome = txtUsername.getText();
       if (nome == null || nome.trim().isEmpty()) {
+        lblClusterAlvo.setText("\u26A0 Digite seu Codinome de Agente para entrar no chat!");
+        lblClusterAlvo.setTextFill(Color.web("#e5a53a"));
         txtUsername.requestFocus();
         return;
       }
@@ -513,11 +508,11 @@ public class ClienteGUI extends Application implements MessageListener {
     login.getChildren().addAll(
         title, avatarContainer, txtUsername, ipBox, lblClusterAlvo, btnConfirmar, btnVoltar);
 
-    // Ao abrir a tela de Login, ja dispara o Discovery UDP automatico em background
-    if (argInicial.isEmpty()) {
-      dispararBuscaDiscovery.accept(false);
-    } else {
+    if (!argInicial.isEmpty()) {
       lblClusterAlvo.setText("\u25C8 Endereco manual informado: " + argInicial);
+    } else {
+      // Dispara busca UDP automatica de fundo logo na abertura da tela de login
+      dispararBuscaDiscovery.accept(false);
     }
     Platform.runLater(txtUsername::requestFocus);
     return login;
@@ -536,13 +531,13 @@ public class ClienteGUI extends Application implements MessageListener {
       String host = sub[0].trim();
       if (sub.length == 1) {
         if ("127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host)) {
-          int[] portasT03 = new int[] { 5000, 5001, 5100, 5101, 5200, 5201 };
+          int[] portasT03 = new int[] { 5001, 5002, 5003, 5004, 5005, 5006, Protocolo.PORTA_SERVIDOR_LEGACY };
           for (int pTcp : portasT03) {
             lista.add(new EnderecoServidor(host, pTcp, calcularPortaUdpPadrao(pTcp),
                 identificarShardPorPortaTcp(pTcp), "ATIVO"));
           }
         } else {
-          int[] portasRemotas = new int[] { 5000, 5100, 5200, Protocolo.PORTA_SERVIDOR_TCP };
+          int[] portasRemotas = new int[] { 5001, 5002, 5003, Protocolo.PORTA_SERVIDOR_LEGACY, Protocolo.PORTA_SERVIDOR_TCP };
           for (int pTcp : portasRemotas) {
             lista.add(new EnderecoServidor(host, pTcp, calcularPortaUdpPadrao(pTcp),
                 identificarShardPorPortaTcp(pTcp), "ATIVO"));
@@ -585,7 +580,7 @@ public class ClienteGUI extends Application implements MessageListener {
       if (modoManual) {
         listaEnderecos.addAll(parseEnderecosServidores(enderecoManual));
       } else {
-        // Executa Discovery UDP automatico atualizado para obter o lider vivo e seu 6o campo (idShard)
+        // Universal Broadcast: aceita a resposta do primeiro lider de shard que responder
         List<EnderecoServidor> descobertosAgora = GerenciadorConexao.descobrirServidoresViaUDP(1000);
         for (EnderecoServidor d : descobertosAgora) {
           if (!listaEnderecos.contains(d)) {
@@ -599,7 +594,7 @@ public class ClienteGUI extends Application implements MessageListener {
             }
           }
         }
-        // Fallback local caso broadcast UDP seja filtrado pelo SO
+        // Fallback local caso broadcast UDP seja filtrado
         if (listaEnderecos.isEmpty()) {
           listaEnderecos.addAll(parseEnderecosServidores("127.0.0.1"));
         }

@@ -29,7 +29,7 @@ public final class MensagensShard {
   private MensagensShard() {
   }
 
-  /** Anuncio periodico: "sou o no X do shard S, meu papel e P, o lider que conheco e L". */
+  /** Anuncio periodico: "sou o no X do shard S, meu papel e P, o lider que conheco e L, meu host e H". */
   public static class AnuncioShard implements Serializable {
     private static final long serialVersionUID = 1L;
     public final int idShard;
@@ -37,13 +37,19 @@ public final class MensagensShard {
     public final String papel;
     public final long epoca;
     public final int idLiderConhecido;
+    public final String host;
 
     public AnuncioShard(int idShard, int idNo, String papel, long epoca, int idLiderConhecido) {
+      this(idShard, idNo, papel, epoca, idLiderConhecido, null);
+    }
+
+    public AnuncioShard(int idShard, int idNo, String papel, long epoca, int idLiderConhecido, String host) {
       this.idShard = idShard;
       this.idNo = idNo;
       this.papel = papel;
       this.epoca = epoca;
       this.idLiderConhecido = idLiderConhecido;
+      this.host = host;
     }
   }
 

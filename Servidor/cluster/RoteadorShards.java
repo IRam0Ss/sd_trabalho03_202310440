@@ -29,7 +29,9 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 
+import Protocol.APDU;
 import cluster.MensagensShard.AnuncioShard;
+import cluster.MensagensShard.PacoteUdpRoteado;
 import cluster.MensagensShard.PedidoConsulta;
 import cluster.MensagensShard.PedidoRoteado;
 import cluster.MensagensShard.RespostaConsulta;
@@ -66,6 +68,11 @@ public class RoteadorShards {
     long epoca();
   }
 
+  /** Callback invocado quando este no (lider ATIVO do shard) recebe uma APDU UDP roteada de outro shard. */
+  public interface ReceptorUdpRoteado {
+    void entregar(APDU apdu, String ipCliente, int portaUdpCliente, int saltos);
+  }
+
   public static final long TIMEOUT_PADRAO_MS = 3000;
   /** Timeout curto (2s) para scatter-gather resiliente de LIST e USERS (Teorema CAP: disponibilidade parcial). */
   public static final long TIMEOUT_SCATTER_MS = 2000;
@@ -100,6 +107,16 @@ public class RoteadorShards {
   private final Boolean[] shardOnline = new Boolean[Particionador.NUM_SHARDS];
   private final long inicioMs = System.currentTimeMillis();
   private volatile boolean executando = true;
+  private volatile ReceptorUdpRoteado receptorUdp = null;
+  private final Set<String> pacotesUdpVistos = Collections.synchronizedSet(
+      Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(512, 0.75f, true) {
+        private static final long serialVersionUID = 1L;
+
+        @Override
+        protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+          return size() > 2000;
+        }
+      }));
 
   private static class Conexao {
     Socket socket;
@@ -130,6 +147,10 @@ public class RoteadorShards {
 
   public TabelaLideres getTabela() {
     return tabela;
+  }
+
+  public void setReceptorUdp(ReceptorUdpRoteado receptorUdp) {
+    this.receptorUdp = receptorUdp;
   }
 
   // =========================================================================
@@ -304,6 +325,12 @@ public class RoteadorShards {
           if (fc != null) {
             fc.complete(rc);
           }
+        }
+        break;
+      case ENCAMINHAR_UDP:
+        if (msg.getPayload() instanceof PacoteUdpRoteado) {
+          final PacoteUdpRoteado pkt = (PacoteUdpRoteado) msg.getPayload();
+          pool.submit(() -> tratarPacoteUdpRoteado(pkt));
         }
         break;
       default:
@@ -793,6 +820,79 @@ public class RoteadorShards {
         String idIdempotente = "usuario-caiu-" + idEvento + "-S" + shard;
         executar(shard, Operacao.removerUsuario(idIdempotente, nomeUsuario), 2000);
       });
+    }
+  }
+
+  // =========================================================================
+  // FASE 5: ENCAMINHAMENTO DE DATAGRAMAS UDP ENTRE SHARDS
+  // =========================================================================
+
+  /**
+   * Encaminha assincronamente uma APDU UDP (SEND, SENDVU, SENDPVT, CONFIRM) para o lider ativo do shardDestino,
+   * preservando o IP e a porta UDP originais do cliente para entrega direta de mensagens e Auto-ACK.
+   */
+  public void encaminharUdp(int shardDestino, APDU apdu, String ipCliente, int portaUdpCliente, int saltos) {
+    Particionador.validarShard(shardDestino);
+    if (apdu == null || saltos > 4) {
+      return;
+    }
+    if (shardDestino == meuShard && "ATIVO".equalsIgnoreCase(ctx.papel())) {
+      ReceptorUdpRoteado rec = this.receptorUdp;
+      if (rec != null) {
+        rec.entregar(apdu, ipCliente, portaUdpCliente, saltos);
+      }
+      return;
+    }
+
+    final String idPacote = UUID.randomUUID().toString();
+    final PacoteUdpRoteado pkt = new PacoteUdpRoteado(
+        idPacote, shardDestino, apdu, ipCliente, portaUdpCliente, saltos);
+
+    pool.submit(() -> {
+      Set<Integer> tentados = new HashSet<>();
+      int liderConhecido = tabela.getLider(shardDestino);
+      if (liderConhecido > 0) {
+        if (enviar(shardDestino, liderConhecido, criarMsg(TipoMensagemCluster.ENCAMINHAR_UDP, pkt))) {
+          return;
+        }
+        tentados.add(liderConhecido);
+        tabela.invalidar(shardDestino, liderConhecido);
+      }
+
+      for (int id = 1; id <= totalReplicas; id++) {
+        if (tentados.contains(id)) continue;
+        if (shardDestino == meuShard && id == config.getMeuId()) continue;
+        if (enviar(shardDestino, id, criarMsg(TipoMensagemCluster.ENCAMINHAR_UDP, pkt))) {
+          return;
+        }
+      }
+
+      System.err.println("[UDP] [ERRO] Particao " + Particionador.nome(shardDestino)
+          + " indisponivel: nao foi possivel encaminhar datagrama " + apdu.getOperacao() + ".");
+    });
+  }
+
+  private void tratarPacoteUdpRoteado(PacoteUdpRoteado pkt) {
+    if (pkt == null || pkt.apdu == null || pkt.shardDestino != meuShard || pkt.saltos > 4) {
+      return;
+    }
+
+    if ("ATIVO".equalsIgnoreCase(ctx.papel())) {
+      if (pkt.idPacote != null && !pacotesUdpVistos.add(pkt.idPacote)) {
+        return;
+      }
+      ReceptorUdpRoteado rec = this.receptorUdp;
+      if (rec != null) {
+        rec.entregar(pkt.apdu, pkt.ipCliente, pkt.portaUdpCliente, pkt.saltos);
+      }
+    } else {
+      // Se este no for STANDBY (ex.: tabela de lideres do emissor estava defasada), repassa ao lider ATIVO deste shard
+      int lider = ctx.idLiderAtivo();
+      if (lider > 0 && lider != config.getMeuId()) {
+        PacoteUdpRoteado repasse = new PacoteUdpRoteado(
+            pkt.idPacote, pkt.shardDestino, pkt.apdu, pkt.ipCliente, pkt.portaUdpCliente, pkt.saltos + 1);
+        enviar(meuShard, lider, criarMsg(TipoMensagemCluster.ENCAMINHAR_UDP, repasse));
+      }
     }
   }
 }

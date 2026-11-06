@@ -146,3 +146,28 @@
   -fx-background-color: transparent;
   -fx-alignment: center;
 }
+
+.cluster-badge {
+  -fx-background-color: rgba(35, 45, 15, 0.78);
+  -fx-border-color: #5b6623;
+  -fx-border-width: 1px;
+  -fx-background-radius: 14px;
+  -fx-border-radius: 14px;
+  -fx-padding: 5px 14px;
+}
+
+.top-shard-bar {
+  -fx-background-color: linear-gradient(to right, #161d09, #222d0e);
+  -fx-border-color: transparent transparent #5b6623 transparent;
+  -fx-border-width: 0 0 1.5px 0;
+  -fx-padding: 7px 16px;
+}
+
+.shard-status-pill {
+  -fx-background-color: rgba(46, 58, 20, 0.88);
+  -fx-border-color: #8a9b3a;
+  -fx-border-width: 1px;
+  -fx-background-radius: 14px;
+  -fx-border-radius: 14px;
+  -fx-padding: 4px 12px;
+}

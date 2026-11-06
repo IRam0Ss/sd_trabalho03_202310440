@@ -11,6 +11,8 @@ package model;
 
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 
 import cluster.RoteadorShards;
 import controller.GerenciadorGrupos;
@@ -21,13 +23,14 @@ import controller.AtendimentoCliente;
  * concorrente de cada nova conexao de cliente para uma instancia de {@link AtendimentoCliente}.
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
- * @version 3.0
+ * @version 3.1
  */
 public class ServidorTCP implements Runnable {
 
   private final int porta;
   private final GerenciadorGrupos gerenciador;
   private final RoteadorShards roteador;
+  private final Set<Socket> conexoesClientes = ConcurrentHashMap.newKeySet();
   private volatile boolean executando = true;
   private ServerSocket servidorTCP;
 
@@ -52,7 +55,8 @@ public class ServidorTCP implements Runnable {
   }
 
   /**
-   * Encerra o servico TCP fechando o ServerSocket.
+   * Encerra o servico TCP fechando o ServerSocket e liberando os sockets de clientes conectados
+   * para sinalizar EOF imediato em caso de step-down ou encerramento gracioso do lider.
    */
   public void parar() {
     this.executando = false;
@@ -62,6 +66,15 @@ public class ServidorTCP implements Runnable {
       } catch (Exception ignored) {
       }
     }
+    for (Socket s : conexoesClientes) {
+      try {
+        if (s != null && !s.isClosed()) {
+          s.close();
+        }
+      } catch (Exception ignored) {
+      }
+    }
+    conexoesClientes.clear();
     System.out.println("[SERVIDOR:TCP] [INFO] Servico na porta " + porta + " encerrado.");
   }
 
@@ -79,12 +92,20 @@ public class ServidorTCP implements Runnable {
 
       while (executando && !servidorTCP.isClosed()) {
         try {
-          Socket conexaoClienteTCP = servidorTCP.accept();
+          final Socket conexaoClienteTCP = servidorTCP.accept();
+          conexoesClientes.removeIf(s -> s == null || s.isClosed());
+          conexoesClientes.add(conexaoClienteTCP);
           System.out.println(
               "[SERVIDOR:TCP] [INFO] Nova conexao recebida de " + conexaoClienteTCP.getInetAddress().getHostAddress());
 
-          Thread threadAtendimentoCliente = new Thread(
-              new AtendimentoCliente(conexaoClienteTCP, gerenciador, roteador));
+          final AtendimentoCliente atendente = new AtendimentoCliente(conexaoClienteTCP, gerenciador, roteador);
+          Thread threadAtendimentoCliente = new Thread(() -> {
+            try {
+              atendente.run();
+            } finally {
+              conexoesClientes.remove(conexaoClienteTCP);
+            }
+          });
           threadAtendimentoCliente.setDaemon(true);
           threadAtendimentoCliente.start();
         } catch (Exception ex) {

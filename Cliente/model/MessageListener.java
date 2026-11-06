@@ -39,6 +39,13 @@ public interface MessageListener {
   default void onReconectado(String ip, int portaTcp, int portaUdp) {}
 
   /**
+   * Disparado quando o cliente conclui o failover informando tambem o ID do Shard da nova porta de entrada.
+   */
+  default void onReconectado(String ip, int portaTcp, int portaUdp, int idShard) {
+    onReconectado(ip, portaTcp, portaUdp);
+  }
+
+  /**
    * Disparado quando o servidor envia notificacao SERVER_CHANGED via UDP.
    */
   default void onServerChanged(String novoIp, int portaTcp, int portaUdp) {}

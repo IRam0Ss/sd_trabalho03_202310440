@@ -76,19 +76,24 @@ public class ClienteGUI extends Application implements MessageListener {
     }
   }
 
+  private Stage stagePrincipal;
   private StackPane root;
   private ImageView watermark;
   private ClienteTCP tcp;
   private ClienteUDP udp;
   private GerenciadorConexao gerenciadorConexao;
   private InfoUser eu;
-  private String ipServidor = "127.0.0.1";
-  private int portaServidor = Protocolo.PORTA_SERVIDOR_TCP;
+  private String ipServidor = "";
+  private int portaServidor = Protocolo.PORTA_SERVIDOR_LEGACY; // 5000 (Shard S0 / Replica 0)
+  private int shardEntradaConectado = -1;
   private String ultimoCodinome = "";
   private String ultimoEnderecoCluster = "";
   private Thread threadRecepcao;
   private Label lblStatus;
+  private Label lblStatusDetalhe;
   private Circle statusDot;
+  private Label lblTopShardStatus;
+  private Circle topStatusDot;
 
   // Chat state
   private Map<String, VBox> chatHistories = new HashMap<>();
@@ -128,6 +133,7 @@ public class ClienteGUI extends Application implements MessageListener {
   @Override
   public void start(Stage primaryStage) {
     instanciaAtiva = this;
+    this.stagePrincipal = primaryStage;
     root = new StackPane();
     root.setStyle("-fx-background-color: #1a1e0b;");
 
@@ -316,10 +322,80 @@ public class ClienteGUI extends Application implements MessageListener {
   }
 
   // =========================================================================
-  // TELA 2 - LOGIN
+  // IDENTIFICACAO E OBSERVABILIDADE DOS SHARDS (T#03 - FASE 6)
+  // =========================================================================
+
+  private static int calcularPortaUdpPadrao(int pTcp) {
+    return GerenciadorConexao.calcularPortaUdpPadrao(pTcp);
+  }
+
+  private static int identificarShardPorPortaTcp(int pTcp) {
+    return GerenciadorConexao.inferirShardPorPortaTcp(pTcp);
+  }
+
+  private static String faixaShard(int idShard) {
+    if (idShard == 0) return "[A..I]";
+    if (idShard == 1) return "[J..R]";
+    if (idShard == 2) return "[S..Z]";
+    return "";
+  }
+
+  private static int shardDaChave(String chave) {
+    if (chave == null || chave.trim().isEmpty()) return 0;
+    char c = Character.toUpperCase(chave.trim().charAt(0));
+    if (c >= 'A' && c <= 'I') return 0;
+    if (c >= 'J' && c <= 'R') return 1;
+    if (c >= 'S' && c <= 'Z') return 2;
+    return 0;
+  }
+
+  private static String rotuloShardEntrada(int idShard, int pTcp) {
+    int shardResolvido = (idShard >= 0) ? idShard : identificarShardPorPortaTcp(pTcp);
+    if (shardResolvido >= 0) {
+      return "Shard S" + shardResolvido;
+    }
+    return "Cluster Central";
+  }
+
+  private void atualizarIndicadorConexao(String host, int pTcp, int idShard) {
+    int shardResolvido = (idShard >= 0) ? idShard : identificarShardPorPortaTcp(pTcp);
+    this.shardEntradaConectado = shardResolvido;
+    String nomeShard = rotuloShardEntrada(shardResolvido, pTcp);
+    String textoTopo = "Status: Conectado (Porta de Entrada: " + nomeShard + ")";
+    String hostLimpo = ("127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host)) ? "Localhost" : host;
+    String detalheTecnico = hostLimpo + " \u2022 TCP " + pTcp
+        + (shardResolvido >= 0 ? " \u2022 " + faixaShard(shardResolvido) : "");
+
+    if (lblTopShardStatus != null) {
+      lblTopShardStatus.setText(textoTopo);
+      lblTopShardStatus.setTextFill(Color.web("#c9d873"));
+      lblTopShardStatus.setTooltip(new Tooltip(
+          textoTopo + " | Endpoint: " + host + ":" + pTcp + " (Proxy Transparente Inter-Shard Ativo)"));
+    }
+    if (topStatusDot != null) {
+      topStatusDot.setFill(Color.web("#c9d873"));
+    }
+    if (lblStatus != null) {
+      lblStatus.setText("Porta de Entrada: " + nomeShard);
+      lblStatus.setTextFill(Color.web("#c9d873"));
+      lblStatus.setTooltip(new Tooltip(textoTopo + " (" + host + ":" + pTcp + ")"));
+    }
+    if (lblStatusDetalhe != null) {
+      lblStatusDetalhe.setText(detalheTecnico);
+    }
+    if (statusDot != null) {
+      statusDot.setFill(Color.web("#c9d873"));
+    }
+    if (stagePrincipal != null && eu != null) {
+      stagePrincipal.setTitle("E.D.E.N. \u2014 Agente: " + eu.getNome() + "  |  " + textoTopo);
+    }
+  }
+
+  // =========================================================================
+  // TELA 2 - LOGIN (DISCOVERY AUTOMATICO PADRAO)
   // =========================================================================
   private Node createLogin() {
-    VBox login = new VBox(20);
+    VBox login = new VBox(16);
     login.setAlignment(Pos.CENTER);
     login.setStyle("-fx-background-color: transparent;");
 
@@ -330,181 +406,94 @@ public class ClienteGUI extends Application implements MessageListener {
 
     // Avatar circle
     StackPane avatarContainer = new StackPane();
-    Circle outerCircle = new Circle(75, Color.web("#232d0f"));
+    Circle outerCircle = new Circle(70, Color.web("#232d0f"));
     outerCircle.setStroke(Color.web("#8a9b3a"));
     outerCircle.setStrokeWidth(2.5);
-    Circle innerCircle = new Circle(52, Color.web("#2e3a14"));
+    Circle innerCircle = new Circle(48, Color.web("#2e3a14"));
 
-    // Simple user icon with circles
-    Circle head = new Circle(18, Color.web("#c9d873"));
-    head.setTranslateY(-14);
-    Circle body = new Circle(28, Color.web("#c9d873"));
-    body.setTranslateY(24);
+    Circle head = new Circle(16, Color.web("#c9d873"));
+    head.setTranslateY(-13);
+    Circle body = new Circle(26, Color.web("#c9d873"));
+    body.setTranslateY(22);
 
     avatarContainer.getChildren().addAll(outerCircle, innerCircle, head, body);
-    avatarContainer.setMaxSize(150, 150);
+    avatarContainer.setMaxSize(144, 144);
 
-    // Verifica se o IP foi passado por parametro no console ou preservado da sessao anterior
-    String defaultIp = (ultimoEnderecoCluster != null && !ultimoEnderecoCluster.trim().isEmpty())
-        ? ultimoEnderecoCluster
-        : (ipServidor != null && !ipServidor.trim().isEmpty() ? ipServidor : "127.0.0.1");
+    // Por padrao deixa o campo vazio para usar o Discovery UDP Automatico;
+    // preenche apenas se o usuario tiver passado argumento de linha de comando explicito
+    String argInicial = "";
     if (getParameters() != null && !getParameters().getRaw().isEmpty()) {
-      defaultIp = getParameters().getRaw().get(0);
+      argInicial = getParameters().getRaw().get(0).trim();
     }
 
     final TextField txtUsername = new TextField(ultimoCodinome != null ? ultimoCodinome : "");
     final Button btnConfirmar = new Button("Conectar ao Jardim");
+    final List<EnderecoServidor> cacheDescobertos = java.util.Collections.synchronizedList(new ArrayList<>());
 
-    TextField txtIpServidor = new TextField(defaultIp);
-    txtIpServidor.setPromptText("IP do Servidor (ex: 192.168.0.10)");
-    txtIpServidor.setPrefWidth(220);
+    final TextField txtIpServidor = new TextField(argInicial);
+    txtIpServidor.setPromptText("Discovery Automatico (ou IP:Porta opcional)");
+    txtIpServidor.setPrefWidth(255);
     txtIpServidor.getStyleClass().add("text-input");
     txtIpServidor.setStyle(
-        "-fx-background-color: rgba(35, 48, 15, 0.8); -fx-text-fill: #e5e8d7; -fx-prompt-text-fill: #8a9b3a; -fx-background-radius: 20px; -fx-border-color: #5b6623; -fx-border-radius: 20px; -fx-border-width: 1px; -fx-padding: 11px 18px; -fx-font-size: 14px;");
+        "-fx-background-color: rgba(35, 48, 15, 0.8); -fx-text-fill: #e5e8d7; -fx-prompt-text-fill: #8a9b3a; -fx-background-radius: 20px; -fx-border-color: #5b6623; -fx-border-radius: 20px; -fx-border-width: 1px; -fx-padding: 10px 16px; -fx-font-size: 13px;");
 
-    Button btnDiscover = new Button("Buscar");
+    final Label lblClusterAlvo = new Label("\u25C9 Buscando lideres de Shard via Discovery UDP...");
+    lblClusterAlvo.getStyleClass().add("cluster-badge");
+    lblClusterAlvo.setFont(Font.font("Consolas", FontWeight.BOLD, 12));
+    lblClusterAlvo.setTextFill(Color.web("#c9d873"));
+
+    final Button btnDiscover = new Button("Buscar");
     btnDiscover.getStyleClass().add("btn-eden");
     btnDiscover.setStyle("-fx-padding: 10px 16px; -fx-font-size: 12px;");
     addHoverScale(btnDiscover);
-    btnDiscover.setOnAction(e -> {
+
+    final java.util.function.Consumer<Boolean> dispararBuscaDiscovery = (autoConectarSeTiverNome) -> {
       btnDiscover.setText("Buscando...");
       btnDiscover.setDisable(true);
+      lblClusterAlvo.setText("\u25C9 Sondando rede via Discovery UDP (EDEN_CLUSTER)...");
+      lblClusterAlvo.setTextFill(Color.web("#c9d873"));
+
       new Thread(() -> {
-        java.util.Set<String> clustersAtivos = new java.util.LinkedHashSet<>();
-        java.util.Set<String> clustersStandby = new java.util.LinkedHashSet<>();
-        java.util.Set<String> outrosServidores = new java.util.LinkedHashSet<>();
+        List<EnderecoServidor> encontrados = GerenciadorConexao.descobrirServidoresViaUDP(1100);
+        cacheDescobertos.clear();
+        cacheDescobertos.addAll(encontrados);
 
-        try (java.net.DatagramSocket socket = new java.net.DatagramSocket()) {
-          socket.setBroadcast(true);
-          socket.setSoTimeout(1000);
-
-          byte[] dadosCluster = Protocolo.DISCOVER_EDEN_CLUSTER.getBytes(StandardCharsets.UTF_8);
-          byte[] dadosPadrao = "SERVIDOR_IP".getBytes(StandardCharsets.UTF_8);
-          byte[] dadosEden = "DISCOVER_EDEN".getBytes(StandardCharsets.UTF_8);
-
-          List<java.net.InetAddress> destinos = coletarBroadcasts();
-          for (java.net.InetAddress dest : destinos) {
-            try {
-              socket.send(new java.net.DatagramPacket(dadosCluster, dadosCluster.length, dest, Protocolo.PORTA_DISCOVERY));
-              socket.send(new java.net.DatagramPacket(dadosCluster, dadosCluster.length, dest, Protocolo.PORTA_DISCOVERY_EDEN));
-              socket.send(new java.net.DatagramPacket(dadosPadrao, dadosPadrao.length, dest, Protocolo.PORTA_DISCOVERY));
-              socket.send(new java.net.DatagramPacket(dadosEden, dadosEden.length, dest, Protocolo.PORTA_DISCOVERY_EDEN));
-            } catch (Exception ignored) {
-            }
-          }
-
-          long tempoLimite = System.currentTimeMillis() + 1800;
-          byte[] buffer = new byte[256];
-          while (System.currentTimeMillis() < tempoLimite) {
-            try {
-              java.net.DatagramPacket resposta = new java.net.DatagramPacket(buffer, buffer.length);
-              socket.receive(resposta);
-              String msg = new String(resposta.getData(), 0, resposta.getLength(), StandardCharsets.UTF_8).trim();
-              String remetenteIp = resposta.getAddress().getHostAddress();
-
-              if (msg.startsWith("EDEN_CLUSTER:")) {
-                // Formato: EDEN_CLUSTER:<id>:<estado>:<portaTcp>:<portaUdp>
-                String[] p = msg.split(":");
-                if (p.length >= 5) {
-                  String estado = p[2];
-                  int pTcp = Integer.parseInt(p[3]);
-                  int pUdp = Integer.parseInt(p[4]);
-                  String ep = remetenteIp + ":" + pTcp + ":" + pUdp;
-                  if ("ATIVO".equalsIgnoreCase(estado)) {
-                    clustersAtivos.add(ep);
-                  } else {
-                    clustersStandby.add(ep);
-                  }
-                } else {
-                  outrosServidores.add(remetenteIp);
-                }
-              } else if (msg.equals("IP") || msg.equals("EDEN_HERE")) {
-                outrosServidores.add(remetenteIp);
-              }
-            } catch (java.net.SocketTimeoutException ste) {
-              if ((!clustersAtivos.isEmpty() || !clustersStandby.isEmpty() || !outrosServidores.isEmpty())
-                  && System.currentTimeMillis() >= tempoLimite - 800) {
-                break;
-              }
-            }
-          }
-        } catch (Exception ex) {
-          System.out.println("[GUI] Erro no discovery UDP: " + ex.getMessage());
-        }
-
-        // Se o broadcast nao achou nenhum servidor via UDP (comum em loopback local),
-        // faz sondagem TCP rapida nas portas padrao de cluster local (6789, 6799, 6809...)
-        if (clustersAtivos.isEmpty() && clustersStandby.isEmpty() && outrosServidores.isEmpty()) {
-          for (int k = 1; k <= 10; k++) {
-            int pTcp = 6789 + 10 * (k - 1);
-            int pUdp = 7777 + 10 * (k - 1);
-            try (java.net.Socket sTest = new java.net.Socket()) {
-              sTest.connect(new java.net.InetSocketAddress("127.0.0.1", pTcp), 70);
-              ClienteTCP tcpTest = new ClienteTCP("127.0.0.1", pTcp);
-              APDU ping = tcpTest.ping();
-              tcpTest.fecharConexao();
-              if (ping != null && Protocolo.OK.equals(ping.getOperacao())) {
-                if ("ATIVO".equalsIgnoreCase(ping.getTextoMensagem())) {
-                  clustersAtivos.add("127.0.0.1:" + pTcp + ":" + pUdp);
-                  break;
-                } else {
-                  clustersStandby.add("127.0.0.1:" + pTcp + ":" + pUdp);
-                }
-              }
-            } catch (Exception ignored) {
-            }
-          }
-        }
-
-        final String alvoCluster;
-        if (!clustersAtivos.isEmpty()) {
-          alvoCluster = clustersAtivos.iterator().next();
-        } else if (!clustersStandby.isEmpty()) {
-          alvoCluster = clustersStandby.iterator().next();
-        } else if (!outrosServidores.isEmpty()) {
-          alvoCluster = outrosServidores.iterator().next();
-        } else {
-          alvoCluster = null;
-        }
-
-        Platform.runLater(() -> {
-          if (alvoCluster == null) {
-            btnDiscover.setText("Nao achou");
-            txtIpServidor.setPromptText("Nao achou, digite o IP...");
-          } else {
-            // Seleciona automaticamente o no do cluster encontrado
-            txtIpServidor.setText(alvoCluster);
-            ultimoEnderecoCluster = alvoCluster;
-            ipServidor = alvoCluster;
-            btnDiscover.setText("Cluster Conectado!");
-
-            // Se o usuario ja preencheu o codinome, conecta diretamente ao cluster!
-            String codinome = txtUsername.getText();
-            if (codinome != null && !codinome.trim().isEmpty()) {
-              btnConfirmar.fire();
-            } else {
-              txtUsername.requestFocus();
-            }
-          }
-        });
-
-        try {
-          Thread.sleep(2000);
-        } catch (Exception ignored) {
-        }
         Platform.runLater(() -> {
           btnDiscover.setText("Buscar");
           btnDiscover.setDisable(false);
-        });
-      }).start();
-    });
 
-    HBox ipBox = new HBox(10);
+          if (encontrados.isEmpty()) {
+            lblClusterAlvo.setText("\u26A0 Nenhum Shard detectado no momento (aguardando lideres)");
+            lblClusterAlvo.setTextFill(Color.web("#e5a53a"));
+          } else {
+            EnderecoServidor lider = encontrados.get(0);
+            String nomeShard = rotuloShardEntrada(lider.idShard, lider.portaTcp);
+            lblClusterAlvo.setText("\u2713 Discovery UDP: Porta de Entrada " + nomeShard
+                + " (" + lider.host + ":" + lider.portaTcp + ")");
+            lblClusterAlvo.setTextFill(Color.web("#c9d873"));
+            txtIpServidor.clear(); // Mantem modo Discovery Automatico ativo
+
+            if (Boolean.TRUE.equals(autoConectarSeTiverNome)) {
+              String codinome = txtUsername.getText();
+              if (codinome != null && !codinome.trim().isEmpty()) {
+                btnConfirmar.fire();
+              } else {
+                txtUsername.requestFocus();
+              }
+            }
+          }
+        });
+      }, "Thread-Login-DiscoveryUDP").start();
+    };
+
+    btnDiscover.setOnAction(e -> dispararBuscaDiscovery.accept(true));
+
+    HBox ipBox = new HBox(8);
     ipBox.setAlignment(Pos.CENTER);
     ipBox.getChildren().addAll(txtIpServidor, btnDiscover);
 
     txtUsername.setPromptText("Digite seu Codinome de Agente");
-    txtUsername.setMaxWidth(330);
+    txtUsername.setMaxWidth(340);
     txtUsername.getStyleClass().add("text-input");
     txtUsername.setStyle(
         "-fx-background-color: rgba(35, 48, 15, 0.8); -fx-text-fill: #e5e8d7; -fx-prompt-text-fill: #8a9b3a; -fx-background-radius: 20px; -fx-border-color: #5b6623; -fx-border-radius: 20px; -fx-border-width: 1px; -fx-padding: 11px 18px; -fx-font-size: 14px;");
@@ -515,18 +504,18 @@ public class ClienteGUI extends Application implements MessageListener {
     addHoverScale(btnConfirmar);
     btnConfirmar.setOnAction(e -> {
       String nome = txtUsername.getText();
-      String ip = txtIpServidor.getText();
-      if (nome != null && !nome.trim().isEmpty() && ip != null && !ip.trim().isEmpty()) {
-        ultimoCodinome = nome.trim();
-        ipServidor = ip.trim();
-        ultimoEnderecoCluster = ipServidor;
-        tentarLogin(nome.trim());
+      if (nome == null || nome.trim().isEmpty()) {
+        txtUsername.requestFocus();
+        return;
       }
+      ultimoCodinome = nome.trim();
+      String manual = txtIpServidor.getText() != null ? txtIpServidor.getText().trim() : "";
+      tentarLogin(nome.trim(), manual, new ArrayList<>(cacheDescobertos));
     });
 
     Button btnVoltar = new Button("\u2190 Voltar");
     btnVoltar.setStyle(
-        "-fx-background-color: transparent; -fx-text-fill: #8a9b3a; -fx-font-size: 12px; -fx-cursor: hand; -fx-padding: 4px 12px;");
+        "-fx-background-color: transparent; -fx-text-fill: #8a9b3a; -fx-font-size: 12px; -fx-cursor: hand; -fx-padding: 2px 12px;");
     btnVoltar.setOnAction(e -> switchView(createSplash()));
     addHoverScale(btnVoltar);
 
@@ -534,14 +523,23 @@ public class ClienteGUI extends Application implements MessageListener {
     txtUsername.setOnAction(e -> btnConfirmar.fire());
     txtIpServidor.setOnAction(e -> txtUsername.requestFocus());
 
-    login.getChildren().addAll(title, avatarContainer, ipBox, txtUsername, btnConfirmar, btnVoltar);
+    login.getChildren().addAll(
+        title, avatarContainer, txtUsername, ipBox, lblClusterAlvo, btnConfirmar, btnVoltar);
+
+    // Ao abrir a tela de Login, ja dispara o Discovery UDP automatico em background
+    if (argInicial.isEmpty()) {
+      dispararBuscaDiscovery.accept(false);
+    } else {
+      lblClusterAlvo.setText("\u25C8 Endereco manual informado: " + argInicial);
+    }
+    Platform.runLater(txtUsername::requestFocus);
     return login;
   }
 
   private List<EnderecoServidor> parseEnderecosServidores(String input) {
     List<EnderecoServidor> lista = new ArrayList<>();
     if (input == null || input.trim().isEmpty()) {
-      input = "127.0.0.1";
+      return lista;
     }
     String[] partes = input.split("[,;\\s]+");
     for (String p : partes) {
@@ -550,43 +548,44 @@ public class ClienteGUI extends Application implements MessageListener {
       String[] sub = p.split(":");
       String host = sub[0].trim();
       if (sub.length == 1) {
-        // Se foi passado apenas o IP/Host sem porta (ex: "127.0.0.1" ou "localhost")
         if ("127.0.0.1".equals(host) || "localhost".equalsIgnoreCase(host)) {
-          // Adiciona portas de cluster local (nos 1 a 10) para encontrar o no lider ativo
-          for (int k = 1; k <= 10; k++) {
-            int pTcp = 6789 + 10 * (k - 1);
-            int pUdp = 7777 + 10 * (k - 1);
-            lista.add(new EnderecoServidor(host, pTcp, pUdp));
+          int[] portasT03 = new int[] { 5000, 5001, 5100, 5101, 5200, 5201 };
+          for (int pTcp : portasT03) {
+            lista.add(new EnderecoServidor(host, pTcp, calcularPortaUdpPadrao(pTcp),
+                identificarShardPorPortaTcp(pTcp), "ATIVO"));
           }
-          lista.add(new EnderecoServidor(host, Protocolo.PORTA_SERVIDOR_LEGACY, Protocolo.PORTA_SERVIDOR_LEGACY));
         } else {
-          lista.add(new EnderecoServidor(host, Protocolo.PORTA_SERVIDOR_TCP, Protocolo.PORTA_SERVIDOR_UDP));
-          lista.add(new EnderecoServidor(host, Protocolo.PORTA_SERVIDOR_LEGACY, Protocolo.PORTA_SERVIDOR_LEGACY));
+          int[] portasRemotas = new int[] { 5000, 5100, 5200, Protocolo.PORTA_SERVIDOR_TCP };
+          for (int pTcp : portasRemotas) {
+            lista.add(new EnderecoServidor(host, pTcp, calcularPortaUdpPadrao(pTcp),
+                identificarShardPorPortaTcp(pTcp), "ATIVO"));
+          }
         }
       } else if (sub.length == 2) {
         try {
           int pTcp = Integer.parseInt(sub[1].trim());
-          int pUdp = (pTcp == Protocolo.PORTA_SERVIDOR_LEGACY) ? Protocolo.PORTA_SERVIDOR_LEGACY : (pTcp + (Protocolo.PORTA_SERVIDOR_UDP - Protocolo.PORTA_SERVIDOR_TCP));
-          lista.add(new EnderecoServidor(host, pTcp, pUdp));
+          int pUdp = calcularPortaUdpPadrao(pTcp);
+          lista.add(new EnderecoServidor(host, pTcp, pUdp, identificarShardPorPortaTcp(pTcp), "ATIVO"));
         } catch (NumberFormatException ignored) {}
       } else if (sub.length >= 3) {
         try {
           int pTcp = Integer.parseInt(sub[1].trim());
           int pUdp = Integer.parseInt(sub[2].trim());
-          lista.add(new EnderecoServidor(host, pTcp, pUdp));
+          int shard = (sub.length >= 4) ? Integer.parseInt(sub[3].trim()) : identificarShardPorPortaTcp(pTcp);
+          lista.add(new EnderecoServidor(host, pTcp, pUdp, shard, "ATIVO"));
         } catch (NumberFormatException ignored) {}
       }
-    }
-    if (lista.isEmpty()) {
-      lista.add(new EnderecoServidor("127.0.0.1", Protocolo.PORTA_SERVIDOR_TCP, Protocolo.PORTA_SERVIDOR_UDP));
     }
     return lista;
   }
 
-  private void tentarLogin(String nome) {
-    // Mostra feedback visual imediato
-    Label lblConectando = new Label("[ CONECTANDO AO JARDIM / CLUSTER ]");
-    lblConectando.setFont(Font.font("Consolas", FontWeight.BOLD, 13));
+  private void tentarLogin(String nome, String enderecoManual, List<EnderecoServidor> preDescobertos) {
+    final boolean modoManual = (enderecoManual != null && !enderecoManual.trim().isEmpty());
+
+    Label lblConectando = new Label(modoManual
+        ? "[ CONECTANDO AO ENDPOINT " + enderecoManual.toUpperCase() + " ]"
+        : "[ BUSCANDO CLUSTER VIA DISCOVERY UDP E CONECTANDO... ]");
+    lblConectando.setFont(Font.font("Consolas", FontWeight.BOLD, 12.5));
     lblConectando.setTextFill(Color.web("#c9d873"));
     lblConectando.setStyle(
         "-fx-background-color: #232d0f; -fx-border-color: #8a9b3a; -fx-border-width: 1.5px; -fx-padding: 12px 24px; -fx-background-radius: 12px; -fx-border-radius: 12px; -fx-effect: dropshadow(gaussian, rgba(0,0,0,0.5), 10, 0, 0, 4);");
@@ -594,9 +593,31 @@ public class ClienteGUI extends Application implements MessageListener {
     StackPane.setMargin(lblConectando, new Insets(0, 0, 30, 0));
     root.getChildren().add(lblConectando);
 
-    // Roda em thread separada para nao travar a UI durante conexao remota
     new Thread(() -> {
-      List<EnderecoServidor> listaEnderecos = parseEnderecosServidores(ipServidor);
+      List<EnderecoServidor> listaEnderecos = new ArrayList<>();
+      if (modoManual) {
+        listaEnderecos.addAll(parseEnderecosServidores(enderecoManual));
+      } else {
+        // Executa Discovery UDP automatico atualizado para obter o lider vivo e seu 6o campo (idShard)
+        List<EnderecoServidor> descobertosAgora = GerenciadorConexao.descobrirServidoresViaUDP(1000);
+        for (EnderecoServidor d : descobertosAgora) {
+          if (!listaEnderecos.contains(d)) {
+            listaEnderecos.add(d);
+          }
+        }
+        if (preDescobertos != null) {
+          for (EnderecoServidor d : preDescobertos) {
+            if (!listaEnderecos.contains(d)) {
+              listaEnderecos.add(d);
+            }
+          }
+        }
+        // Fallback local caso broadcast UDP seja filtrado pelo SO
+        if (listaEnderecos.isEmpty()) {
+          listaEnderecos.addAll(parseEnderecosServidores("127.0.0.1"));
+        }
+      }
+
       EnderecoServidor liderEncontrado = null;
       ClienteTCP tcpNovo = null;
       ClienteUDP udpNovo = null;
@@ -604,16 +625,17 @@ public class ClienteGUI extends Application implements MessageListener {
       APDU resRegistro = null;
       String erroMsg = null;
 
-      System.out.println("[GUI] Tentando conexao com servidores conhecidos: " + listaEnderecos);
+      System.out.println("[GUI] Candidatos de conexao obtidos (Discovery/Config): " + listaEnderecos);
 
       // 1. Procura primeiro quem responder como "ATIVO"
       for (EnderecoServidor end : listaEnderecos) {
         try {
-          System.out.println("[GUI] Testando no " + end + "...");
+          System.out.println("[GUI] Testando lider em " + end + "...");
           ClienteTCP tcpTentativa = new ClienteTCP(end.host, end.portaTcp);
-          APDU pingRes = tcpTentativa.ping();
-          if (pingRes != null && Protocolo.OK.equals(pingRes.getOperacao()) && "ATIVO".equalsIgnoreCase(pingRes.getTextoMensagem())) {
-            System.out.println("[GUI] Lider ATIVO identificado em " + end);
+          APDU pingRes = tcpTentativa.pingDireto();
+          if (pingRes != null && Protocolo.OK.equals(pingRes.getOperacao())
+              && "ATIVO".equalsIgnoreCase(pingRes.getTextoMensagem())) {
+            System.out.println("[GUI] Lider ATIVO confirmado em " + end);
             tcpNovo = tcpTentativa;
             udpNovo = new ClienteUDP(end.host, end.portaUdp);
             udpNovo.setListener(this);
@@ -631,11 +653,10 @@ public class ClienteGUI extends Application implements MessageListener {
         }
       }
 
-      // 2. Se nenhum respondeu explicitamente como ATIVO, tenta conectar normalmente com o primeiro que responder
+      // 2. Fallback compativel com servidores legados (T#01) que nao implementam PING
       if (liderEncontrado == null) {
         for (EnderecoServidor end : listaEnderecos) {
           try {
-            System.out.println("[GUI] Tentando conexao padrao com " + end + "...");
             ClienteTCP tcpTentativa = new ClienteTCP(end.host, end.portaTcp);
             udpNovo = new ClienteUDP(end.host, end.portaUdp);
             udpNovo.setListener(this);
@@ -657,17 +678,20 @@ public class ClienteGUI extends Application implements MessageListener {
       final InfoUser finalUsuario = usuario;
       final APDU finalRegistro = resRegistro;
       final String finalErro = erroMsg;
+      final List<EnderecoServidor> finalLista = listaEnderecos;
 
       Platform.runLater(() -> {
         root.getChildren().remove(lblConectando);
         if (finalLider == null || finalTcp == null) {
-          showErrorOverlay("Erro de Conexao", "Nao foi possivel conectar a nenhum servidor em:\n" + ipServidor
-              + "\nVerifique se o cluster esta rodando.\nDetalhe: " + (finalErro != null ? finalErro : "Nenhum no ativo"));
+          showErrorOverlay("Erro de Conexao",
+              "Nenhum lider de Shard ativo respondeu ao Discovery UDP na rede.\n"
+                  + "Verifique se pelo menos um Shard (S0, S1 ou S2) esta em execucao.\n"
+                  + "Detalhe: " + (finalErro != null ? finalErro : "Sem resposta ao farol UDP"));
           return;
         }
 
         if (finalRegistro != null && Protocolo.ERRO.equals(finalRegistro.getOperacao())) {
-          showErrorOverlay("Violacao de Protocolo", finalRegistro.getTextoMensagem());
+          showErrorOverlay("Falha no Registro", finalRegistro.getTextoMensagem());
           finalTcp.fecharConexao();
           if (finalUdp != null) finalUdp.fecharConexao();
           return;
@@ -677,17 +701,22 @@ public class ClienteGUI extends Application implements MessageListener {
         udp = finalUdp;
         eu = finalUsuario;
         ultimoCodinome = finalUsuario.getNome();
+        portaServidor = finalLider.portaTcp;
+        shardEntradaConectado = (finalLider.idShard >= 0)
+            ? finalLider.idShard
+            : identificarShardPorPortaTcp(finalLider.portaTcp);
         ultimoEnderecoCluster = finalLider.host + ":" + finalLider.portaTcp + ":" + finalLider.portaUdp;
         ipServidor = ultimoEnderecoCluster;
-        gerenciadorConexao = new GerenciadorConexao(listaEnderecos, tcp, udp, eu, this);
+
+        gerenciadorConexao = new GerenciadorConexao(finalLista, tcp, udp, eu, this, shardEntradaConectado);
         gerenciadorConexao.iniciarMonitoramento();
 
-        threadRecepcao = new Thread(udp);
+        threadRecepcao = new Thread(udp, "Thread-ClienteUDP-Recepcao");
         threadRecepcao.setDaemon(true);
         threadRecepcao.start();
         switchView(createChat());
       });
-    }).start();
+    }, "Thread-TentativaLogin").start();
   }
 
   // =========================================================================
@@ -702,6 +731,41 @@ public class ClienteGUI extends Application implements MessageListener {
     // Fundo transparente para o watermark do root aparecer por baixo
     chatPane.setStyle("-fx-background-color: transparent;");
     chatPane.setBackground(javafx.scene.layout.Background.EMPTY);
+
+    // ===== PAINEL SUPERIOR DE OBSERVABILIDADE DO SHARD (FASE 6) =====
+    HBox topStatusBar = new HBox(12);
+    topStatusBar.setAlignment(Pos.CENTER_LEFT);
+    topStatusBar.getStyleClass().add("top-shard-bar");
+
+    String nomeAgente = (eu != null && eu.getNome() != null) ? eu.getNome() : "Agente";
+    int shardProprioAgente = shardDaChave(nomeAgente);
+    Label lblAgenteInfo = new Label("E.D.E.N.  \u2022  Agente: " + nomeAgente
+        + "  (Chave: S" + shardProprioAgente + " " + faixaShard(shardProprioAgente) + ")");
+    lblAgenteInfo.setFont(Font.font("Consolas", FontWeight.BOLD, 12.5));
+    lblAgenteInfo.setTextFill(Color.web("#a4b455"));
+
+    javafx.scene.layout.Region topSpacer = new javafx.scene.layout.Region();
+    HBox.setHgrow(topSpacer, Priority.ALWAYS);
+
+    HBox pillShard = new HBox(8);
+    pillShard.setAlignment(Pos.CENTER_LEFT);
+    pillShard.getStyleClass().add("shard-status-pill");
+
+    this.topStatusDot = new Circle(4.5, Color.web("#c9d873"));
+    FadeTransition topPulse = new FadeTransition(Duration.seconds(1), topStatusDot);
+    topPulse.setFromValue(0.35);
+    topPulse.setToValue(1.0);
+    topPulse.setCycleCount(javafx.animation.Animation.INDEFINITE);
+    topPulse.setAutoReverse(true);
+    topPulse.play();
+
+    this.lblTopShardStatus = new Label();
+    this.lblTopShardStatus.setFont(Font.font("Consolas", FontWeight.BOLD, 12.5));
+    this.lblTopShardStatus.setTextFill(Color.web("#c9d873"));
+
+    pillShard.getChildren().addAll(topStatusDot, lblTopShardStatus);
+    topStatusBar.getChildren().addAll(lblAgenteInfo, topSpacer, pillShard);
+    chatPane.setTop(topStatusBar);
 
     // ===== SIDEBAR ESQUERDA =====
     VBox sidebar = new VBox(8);
@@ -869,9 +933,11 @@ public class ClienteGUI extends Application implements MessageListener {
     Separator sep2 = new Separator();
     sep2.setStyle("-fx-background-color: #8a9b3a;");
 
-    HBox statusBox = new HBox(5);
+    HBox statusBox = new HBox(7);
     statusBox.setAlignment(Pos.CENTER_LEFT);
-    this.statusDot = new Circle(4, Color.web("#c9d873"));
+    statusBox.setPadding(new Insets(3, 6, 3, 6));
+    statusBox.setStyle("-fx-background-color: rgba(35, 48, 15, 0.6); -fx-background-radius: 10px; -fx-border-color: rgba(138, 155, 58, 0.35); -fx-border-radius: 10px; -fx-border-width: 1px;");
+    this.statusDot = new Circle(4.5, Color.web("#c9d873"));
     // Pulsing animation for the dot
     FadeTransition pulse = new FadeTransition(Duration.seconds(1), statusDot);
     pulse.setFromValue(0.4);
@@ -880,11 +946,20 @@ public class ClienteGUI extends Application implements MessageListener {
     pulse.setAutoReverse(true);
     pulse.play();
 
-    String endpointConectado = (tcp != null) ? (tcp.getIpServidor() + ":" + tcp.getPortaServidor()) : ipServidor;
-    this.lblStatus = new Label("Conectado a " + endpointConectado);
-    this.lblStatus.setFont(Font.font("Segoe UI", 11));
-    this.lblStatus.setTextFill(Color.web("#8a9b3a"));
-    statusBox.getChildren().addAll(statusDot, lblStatus);
+    this.lblStatus = new Label();
+    this.lblStatus.setFont(Font.font("Segoe UI", FontWeight.BOLD, 11));
+    this.lblStatus.setTextFill(Color.web("#c9d873"));
+
+    this.lblStatusDetalhe = new Label();
+    this.lblStatusDetalhe.setFont(Font.font("Consolas", 10));
+    this.lblStatusDetalhe.setTextFill(Color.web("#8a9b3a"));
+
+    VBox statusTextos = new VBox(1, lblStatus, lblStatusDetalhe);
+    statusBox.getChildren().addAll(statusDot, statusTextos);
+
+    String hostConectado = (tcp != null && tcp.getIpServidor() != null) ? tcp.getIpServidor() : "127.0.0.1";
+    int portaConectada = (tcp != null) ? tcp.getPortaServidor() : portaServidor;
+    atualizarIndicadorConexao(hostConectado, portaConectada, shardEntradaConectado);
 
     Button btnDesconectar = new Button("\u2190 Desconectar");
     btnDesconectar.setStyle(
@@ -2253,10 +2328,20 @@ public class ClienteGUI extends Application implements MessageListener {
   @Override
   public void onConexaoPerdida() {
     Platform.runLater(() -> {
-      System.out.println("[GUI] [FAILOVER] Conexao com o lider perdida. Buscando novo servidor...");
+      System.out.println("[GUI] [FAILOVER] Queda na Porta de Entrada detectada! Disparando Discovery UDP para reconectar...");
+      if (lblTopShardStatus != null) {
+        lblTopShardStatus.setText("Status: Reconectando via Discovery UDP...");
+        lblTopShardStatus.setTextFill(Color.web("#e5a53a"));
+      }
+      if (topStatusDot != null) {
+        topStatusDot.setFill(Color.web("#e5a53a"));
+      }
       if (lblStatus != null) {
-        lblStatus.setText("Reconectando ao cluster...");
+        lblStatus.setText("Reconectando via Discovery...");
         lblStatus.setTextFill(Color.web("#e5a53a"));
+      }
+      if (lblStatusDetalhe != null) {
+        lblStatusDetalhe.setText("Buscando lider de Shard ativo...");
       }
       if (statusDot != null) {
         statusDot.setFill(Color.web("#e5a53a"));
@@ -2266,17 +2351,20 @@ public class ClienteGUI extends Application implements MessageListener {
 
   @Override
   public void onReconectado(String ip, int portaTcp, int portaUdp) {
+    onReconectado(ip, portaTcp, portaUdp, identificarShardPorPortaTcp(portaTcp));
+  }
+
+  @Override
+  public void onReconectado(String ip, int portaTcp, int portaUdp, int idShard) {
     Platform.runLater(() -> {
-      System.out.println("[GUI] [FAILOVER] Reconectado com sucesso ao no " + ip + ":" + portaTcp);
+      int shardResolvido = (idShard >= 0) ? idShard : identificarShardPorPortaTcp(portaTcp);
+      System.out.println("[GUI] [FAILOVER] Reconectado com sucesso -> Porta de Entrada: "
+          + rotuloShardEntrada(shardResolvido, portaTcp) + " (" + ip + ":" + portaTcp + ")");
+      this.portaServidor = portaTcp;
+      this.shardEntradaConectado = shardResolvido;
       this.ipServidor = ip + ":" + portaTcp + ":" + portaUdp;
       this.ultimoEnderecoCluster = this.ipServidor;
-      if (lblStatus != null) {
-        lblStatus.setText("Conectado a " + ip + ":" + portaTcp);
-        lblStatus.setTextFill(Color.web("#8a9b3a"));
-      }
-      if (statusDot != null) {
-        statusDot.setFill(Color.web("#c9d873"));
-      }
+      atualizarIndicadorConexao(ip, portaTcp, shardResolvido);
       refreshOnlineUsers();
     });
   }
@@ -2284,11 +2372,31 @@ public class ClienteGUI extends Application implements MessageListener {
   @Override
   public void onServerChanged(String novoIp, int novaPortaTcp, int novaPortaUdp) {
     Platform.runLater(() -> {
-      System.out.println("[GUI] [CLUSTER] Aviso de troca de servidor recebido: " + novoIp + ":" + novaPortaTcp);
+      int shardAtual = (this.shardEntradaConectado >= 0)
+          ? this.shardEntradaConectado
+          : (tcp != null ? identificarShardPorPortaTcp(tcp.getPortaServidor()) : -1);
+      int shardNovo = identificarShardPorPortaTcp(novaPortaTcp);
+
+      if (gerenciadorConexao != null) {
+        gerenciadorConexao.adicionarServidor(novoIp, novaPortaTcp, novaPortaUdp, shardNovo);
+      }
+
+      // So migra proativamente por SERVER_CHANGED se o failover ocorreu no MESMO shard da Porta de Entrada atual;
+      // se outro shard trocou de replica interna, mantemos a Porta de Entrada atual intacta!
+      if (shardAtual >= 0 && shardNovo >= 0 && shardAtual != shardNovo) {
+        System.out.println("[GUI] [CLUSTER] Troca de replica interna no Shard S" + shardNovo
+            + " (" + novaPortaTcp + "). Porta de Entrada mantida no Shard S" + shardAtual + ".");
+        return;
+      }
+
+      System.out.println("[GUI] [CLUSTER] Aviso SERVER_CHANGED na Porta de Entrada -> "
+          + rotuloShardEntrada(shardNovo, novaPortaTcp) + " (" + novoIp + ":" + novaPortaTcp + ")");
+      this.portaServidor = novaPortaTcp;
+      this.shardEntradaConectado = shardNovo;
       this.ipServidor = novoIp + ":" + novaPortaTcp + ":" + novaPortaUdp;
       this.ultimoEnderecoCluster = this.ipServidor;
       if (gerenciadorConexao != null) {
-        gerenciadorConexao.adicionarServidor(novoIp, novaPortaTcp, novaPortaUdp);
+        gerenciadorConexao.setShardEntradaAtual(shardNovo);
       }
       try {
         if (tcp != null) {
@@ -2300,13 +2408,7 @@ public class ClienteGUI extends Application implements MessageListener {
       } catch (Exception e) {
         System.out.println("[GUI] [ERROR] Falha ao atualizar destino para novo servidor: " + e.getMessage());
       }
-      if (lblStatus != null) {
-        lblStatus.setText("Conectado a " + novoIp + ":" + novaPortaTcp);
-        lblStatus.setTextFill(Color.web("#8a9b3a"));
-      }
-      if (statusDot != null) {
-        statusDot.setFill(Color.web("#c9d873"));
-      }
+      atualizarIndicadorConexao(novoIp, novaPortaTcp, shardNovo);
       refreshOnlineUsers();
     });
   }
@@ -2315,8 +2417,11 @@ public class ClienteGUI extends Application implements MessageListener {
     if (eu != null && eu.getNome() != null && !eu.getNome().trim().isEmpty()) {
       this.ultimoCodinome = eu.getNome().trim();
     }
-    if (tcp != null && tcp.getIpServidor() != null) {
-      this.ultimoEnderecoCluster = tcp.getIpServidor() + ":" + tcp.getPortaServidor();
+    this.ultimoEnderecoCluster = "";
+    this.ipServidor = "";
+    this.shardEntradaConectado = -1;
+    if (stagePrincipal != null) {
+      Platform.runLater(() -> stagePrincipal.setTitle("E.D.E.N. - Sistema de Comunicacao Interno"));
     }
     if (gerenciadorConexao != null) {
       gerenciadorConexao.parar();

@@ -334,7 +334,8 @@ public class GerenciadorGrupos implements Serializable {
       LinkedHashSet<String> membros = entry.getValue();
       if (membros.remove(norm)) {
         membroRemovidoDeAlgumGrupo = true;
-        System.out.println("[GERENCIADOR] [INFO] Usuario '" + nome + "' removido do grupo '" + nomeGrupo + "'.");
+        System.out.println("[GERENCIADOR] [INFO] SAIR_GRUPO automatico: Usuario '" + nome
+            + "' removido do grupo '" + nomeGrupo + "'.");
         if (membros.isEmpty()) {
           gruposParaRemover.add(nomeGrupo);
         }

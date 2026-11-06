@@ -52,6 +52,16 @@ public class ClienteUDP implements Runnable {
     System.out.println("[CLIENTE:UDP] [INFO] Socket vinculado a porta efemera " + socketUDP.getLocalPort());
   }
 
+  private static int identificarShardPortaUdp(int porta) {
+    if (porta == Protocolo.PORTA_SERVIDOR_LEGACY) {
+      return 0;
+    }
+    if (porta >= 6000 && porta < 6300) {
+      return (porta - 6000) / 100;
+    }
+    return -1;
+  }
+
   public int getPortaLocal() {
     return socketUDP.getLocalPort();
   }
@@ -177,7 +187,12 @@ public class ClienteUDP implements Runnable {
               String novoIp = partes[0];
               int novoTcp = Integer.parseInt(partes[1]);
               int novoUdp = Integer.parseInt(partes[2]);
-              setDestino(novoIp, novoUdp);
+              int shardAtual = identificarShardPortaUdp(this.portaServidor);
+              int shardNovo = identificarShardPortaUdp(novoUdp);
+              // So redireciona automaticamente o socket UDP se o failover ocorreu no MESMO shard do gateway atual
+              if (shardAtual < 0 || shardNovo < 0 || shardAtual == shardNovo) {
+                setDestino(novoIp, novoUdp);
+              }
               if (listener != null) {
                 listener.onServerChanged(novoIp, novoTcp, novoUdp);
               }

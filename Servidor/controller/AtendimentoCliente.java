@@ -12,10 +12,13 @@ package controller;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.io.EOFException;
+import java.io.IOException;
 import java.net.Socket;
+import java.net.SocketException;
 import java.util.Collection;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import Protocol.APDU;
 import cluster.ClusterLog;
@@ -43,6 +46,7 @@ public class AtendimentoCliente implements Runnable {
   private final RoteadorShards roteador;
   private InfoUser usuarioAssociado = null;
   private ObjectOutputStream saidaObjetos;
+  private final AtomicBoolean faxinaExecutada = new AtomicBoolean(false);
 
   private static final java.util.concurrent.atomic.AtomicLong totalPingsAtendidos = new java.util.concurrent.atomic.AtomicLong(0);
   private static volatile long ultimoLogPing = 0;
@@ -97,48 +101,75 @@ public class AtendimentoCliente implements Runnable {
           if (apduRecebida != null) {
             processarAPDU(apduRecebida);
           }
-        } catch (EOFException e) {
-          // Encerramento normal do stream pelo cliente
+        } catch (EOFException | SocketException e) {
+          // Queda ou encerramento do socket TCP do cliente -> dispara faxina imediata
+          desconectarClienteInativoGlobal("Queda do socket TCP (" + e.getClass().getSimpleName() + ")");
           break;
         }
       }
-    } catch (EOFException e) {
-      // Stream finalizado
+    } catch (EOFException | SocketException e) {
+      desconectarClienteInativoGlobal("Encerramento abrupto do stream TCP (" + e.getClass().getSimpleName() + ")");
+    } catch (IOException e) {
+      System.err.println("[ATENDIMENTO] [INFO] Conexao IO encerrada com o cliente: " + e.getMessage());
+      desconectarClienteInativoGlobal("Falha de I/O TCP (" + e.getMessage() + ")");
     } catch (Exception e) {
       System.err.println("[ATENDIMENTO] [INFO] Conexao encerrada com o cliente: " + e.getMessage());
+      desconectarClienteInativoGlobal("Excecao na sessao TCP");
     } finally {
       try {
-        if (this.usuarioAssociado != null && this.usuarioAssociado.getNome() != null) {
-          String nome = this.usuarioAssociado.getNome();
-          if (this.roteador != null) {
-            if (this.gerenciador.encerrarSessaoLocalSeAtiva(nome, this)) {
-              ClusterLog.erro("GHOST-CLIENT", "Queda brusca TCP detectada para '" + nome
-                  + "'. Disparando broadcast UDP interno USUARIO_CAIU para todos os shards...");
-              this.roteador.tratarQuedaBruscaUsuario(nome);
-              dispararUpdateUsuariosGlobal();
-            }
-          } else {
-            System.out.println("[ATENDIMENTO] [CLEANUP] Cliente '" + nome
-                + "' encerrou conexao TCP bruscamente. Limpando sessoes e grupos...");
-            Resultado res = this.gerenciador.desconectarClienteInativo(nome, this);
-            if (res != null && res.isNotificarAtualizacaoUsuarios()) {
-              NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
-            }
-          }
-        }
-      } catch (Exception e) {
-        System.err.println("[ATENDIMENTO] [ERROR] Falha na limpeza de cliente inativo: " + e.getMessage());
+        desconectarClienteInativoGlobal("Fechamento da thread de atendimento");
       } finally {
-        try {
-          if (this.saidaObjetos != null) {
-            this.saidaObjetos.close();
+        fecharSocketSilencioso();
+      }
+    }
+  }
+
+  /**
+   * Garante a faxina de cliente fantasma exatamente uma vez quando a conexao TCP cai sem LOGOUT previo,
+   * roteando REMOVER_USUARIO + SAIR_GRUPO para todos os shards e atualizando a lista global de online.
+   */
+  private void desconectarClienteInativoGlobal(String motivo) {
+    if (!faxinaExecutada.compareAndSet(false, true)) {
+      return;
+    }
+    try {
+      if (this.usuarioAssociado != null && this.usuarioAssociado.getNome() != null) {
+        String nome = this.usuarioAssociado.getNome();
+        if (this.roteador != null) {
+          // Limpa localmente (REMOVER_USUARIO + SAIR_GRUPO no proprio shard se ativo) e propaga aos outros shards
+          Resultado resLocal = this.gerenciador.desconectarClienteInativo(nome, this);
+          if (resLocal != null && !"Sessao ignorada ou ja renovada".equals(resLocal.getMensagem())) {
+            ClusterLog.erro("GHOST-CLIENT", "Desconexao TCP inativa detectada para '" + nome
+                + "' [" + motivo + "]. Roteando REMOVER_USUARIO e SAIR_GRUPO para todos os shards...");
+            this.roteador.tratarQuedaBruscaUsuario(nome);
+            dispararUpdateUsuariosGlobal();
           }
-          if (this.conexao != null && !this.conexao.isClosed()) {
-            this.conexao.close();
+        } else {
+          System.out.println("[ATENDIMENTO] [CLEANUP] Cliente '" + nome
+              + "' encerrou conexao TCP [" + motivo + "]. Limpando sessoes e grupos...");
+          Resultado res = this.gerenciador.desconectarClienteInativo(nome, this);
+          if (res != null && res.isNotificarAtualizacaoUsuarios()) {
+            NotificadorClientes.notificarAtualizacaoUsuarios(this.gerenciador.getTodosUsuariosAtivos());
           }
-        } catch (Exception ignored) {
         }
       }
+    } catch (Exception e) {
+      System.err.println("[ATENDIMENTO] [ERROR] Falha na limpeza de cliente inativo: " + e.getMessage());
+    }
+  }
+
+  private void fecharSocketSilencioso() {
+    try {
+      if (this.saidaObjetos != null) {
+        this.saidaObjetos.close();
+      }
+    } catch (Exception ignored) {
+    }
+    try {
+      if (this.conexao != null && !this.conexao.isClosed()) {
+        this.conexao.close();
+      }
+    } catch (Exception ignored) {
     }
   }
 
@@ -161,6 +192,7 @@ public class AtendimentoCliente implements Runnable {
       this.saidaObjetos.flush();
     } catch (Exception e) {
       System.err.println("[ATENDIMENTO] [ERROR] Erro ao enviar resposta: " + e.getMessage());
+      fecharSocketSilencioso();
     }
   }
 
@@ -469,8 +501,13 @@ public class AtendimentoCliente implements Runnable {
       return;
     }
     new Thread(() -> {
-      List<InfoUser> todos = this.roteador.coletarTodosUsuariosAtivos();
-      NotificadorClientes.notificarAtualizacaoUsuarios(todos);
+      try {
+        List<InfoUser> todos = this.roteador.coletarTodosUsuariosAtivos();
+        if (!todos.isEmpty() || this.gerenciador.isAtivo()) {
+          NotificadorClientes.notificarAtualizacaoUsuarios(todos);
+        }
+      } catch (Exception ignored) {
+      }
     }, "Thread-Global-UpdateUsers").start();
   }
 }

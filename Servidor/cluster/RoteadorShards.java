@@ -648,6 +648,9 @@ public class RoteadorShards {
    * Se um shard estiver totalmente offline, agrega os demais e retorna resposta parcial sem travar.
    */
   public List<String> listarGruposGlobal() {
+    if (!executando) {
+      return Collections.emptyList();
+    }
     long t0 = System.currentTimeMillis();
     List<CompletableFuture<RespostaConsulta>> futuros = new ArrayList<>();
     for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
@@ -692,6 +695,9 @@ public class RoteadorShards {
    * Retorna os objetos InfoUser de todos os shards alcancaveis sem bloquear o cliente se uma particao cair.
    */
   public List<InfoUser> coletarTodosUsuariosAtivos() {
+    if (!executando) {
+      return Collections.emptyList();
+    }
     long t0 = System.currentTimeMillis();
     List<CompletableFuture<RespostaConsulta>> futuros = new ArrayList<>();
     for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
@@ -805,22 +811,42 @@ public class RoteadorShards {
 
   /**
    * Trata a queda brusca de conexao TCP (Ghost Client): dispara broadcast UDP interno USUARIO_CAIU
-   * para todos os lideres e tambem encaminha limpeza idempotente (mesmo idEvento) aos shards alcancaveis.
+   * para todos os lideres e roteia sincronamente (em paralelo com timeout curto) REMOVER_USUARIO + SAIR_GRUPO
+   * para todos os 3 shards (S0, S1 e S2), limpando o cliente fantasma da memoria e das replicas de todos.
    */
   public void tratarQuedaBruscaUsuario(String nomeUsuario) {
-    if (nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
+    if (!executando || nomeUsuario == null || nomeUsuario.trim().isEmpty()) {
       return;
     }
+    final String nomeTrim = nomeUsuario.trim();
     final String idEvento = UUID.randomUUID().toString().substring(0, 8);
-    BeaconClusterLAN.dispararBroadcastUsuarioCaiu(idEvento, nomeUsuario, meuShard, config.getIdReplica());
+    BeaconClusterLAN.dispararBroadcastUsuarioCaiu(idEvento, nomeTrim, meuShard, config.getIdReplica());
 
+    List<CompletableFuture<Resultado>> futuros = new ArrayList<>();
     for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
       final int shard = s;
-      pool.submit(() -> {
+      futuros.add(CompletableFuture.supplyAsync(() -> {
         String idIdempotente = "usuario-caiu-" + idEvento + "-S" + shard;
-        executar(shard, Operacao.removerUsuario(idIdempotente, nomeUsuario), 2000);
-      });
+        return executar(shard, Operacao.removerUsuario(idIdempotente, nomeTrim), 2000);
+      }, pool));
     }
+
+    long limite = System.currentTimeMillis() + 2200;
+    List<String> shardsLimpos = new ArrayList<>();
+    for (int s = 0; s < Particionador.NUM_SHARDS; s++) {
+      try {
+        long espera = Math.max(50, limite - System.currentTimeMillis());
+        Resultado r = futuros.get(s).get(espera, TimeUnit.MILLISECONDS);
+        if (r != null && r.isSucesso()) {
+          shardsLimpos.add("S" + s);
+        }
+      } catch (Exception ignored) {
+      }
+    }
+
+    ClusterLog.info("GHOST-CLIENT", String.format(
+        "Faxina cross-shard concluida para '%s' [ev=%s]: REMOVER_USUARIO e SAIR_GRUPO aplicados nos shards %s.",
+        nomeTrim, idEvento, shardsLimpos));
   }
 
   // =========================================================================

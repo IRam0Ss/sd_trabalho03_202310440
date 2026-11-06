@@ -94,15 +94,32 @@ public class Servidor {
     new Thread(tcpPrincipal, "Thread-ServidorTCP-" + portaTcp).start();
 
     // 2. Servico UDP principal (6000 + idShard*100 + idReplica)
-    ServidorUDP udpPrincipal = new ServidorUDP(portaUdp, gerenciador);
+    final ServidorUDP udpPrincipal = new ServidorUDP(portaUdp, gerenciador, roteador);
     servicosUDP.add(udpPrincipal);
     new Thread(udpPrincipal, "Thread-ServidorUDP-" + portaUdp).start();
+    if (roteador != null) {
+      roteador.setReceptorUdp((apdu, ipCliente, portaUdpCliente, saltos) ->
+          udpPrincipal.receberPacoteRoteado(apdu, ipCliente, portaUdpCliente, saltos));
+    }
 
-    // 3. Servico Discovery padrao (8888)
+    // 3. Servico Discovery padrao (8888) + porta dedicada do Shard (8898 + idShard) para loopback/LAN sem colisao
     ServidorDiscovery discPrincipal = new ServidorDiscovery(portaDiscovery);
     discPrincipal.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
     servicosDiscovery.add(discPrincipal);
     new Thread(discPrincipal, "Thread-ServidorDiscovery-" + portaDiscovery).start();
+
+    int portaDiscoveryShard = Protocolo.PORTA_DISCOVERY + 10 + Math.max(0, idShard);
+    boolean discoveryShardAberto = false;
+    if (portaDiscoveryShard != portaDiscovery && portaDiscoveryShard != Protocolo.PORTA_DISCOVERY_EDEN) {
+      try {
+        ServidorDiscovery discShard = new ServidorDiscovery(portaDiscoveryShard);
+        discShard.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
+        servicosDiscovery.add(discShard);
+        new Thread(discShard, "Thread-ServidorDiscovery-Shard-" + portaDiscoveryShard).start();
+        discoveryShardAberto = true;
+      } catch (Exception ignored) {
+      }
+    }
 
     boolean discovery5001Aberto = false;
     boolean udp5000Aberto = false;
@@ -125,7 +142,7 @@ public class Servidor {
       // UDP legado na 5000 (pois o UDP principal de S0/R0 e 6000)
       if (portaUdp != Protocolo.PORTA_SERVIDOR_LEGACY) {
         try {
-          ServidorUDP udpLegado = new ServidorUDP(Protocolo.PORTA_SERVIDOR_LEGACY, gerenciador);
+          ServidorUDP udpLegado = new ServidorUDP(Protocolo.PORTA_SERVIDOR_LEGACY, gerenciador, roteador);
           servicosUDP.add(udpLegado);
           new Thread(udpLegado, "Thread-ServidorUDP-Legado-5000").start();
           udp5000Aberto = true;
@@ -153,6 +170,7 @@ public class Servidor {
     System.out.println("TCP escutando em " + portaTcp + (tcp5000ExtraAberto ? " (+ legado 5000)" : ""));
     System.out.println("UDP escutando em " + portaUdp + (udp5000Aberto ? " (+ legado 5000)" : ""));
     System.out.println("Discovery escutando em " + portaDiscovery
+        + (discoveryShardAberto ? ", " + portaDiscoveryShard : "")
         + (discovery5001Aberto ? " e " + Protocolo.PORTA_DISCOVERY_EDEN : ""));
     System.out.println("=================================================================");
   }
@@ -166,6 +184,9 @@ public class Servidor {
     }
     System.out.println("[SERVIDOR] [INFO] Fechando portas de servico de atendimento...");
     this.gerenciador.setAtivo(false);
+    if (this.roteador != null) {
+      this.roteador.setReceptorUdp(null);
+    }
 
     for (ServidorTCP tcp : servicosTCP) {
       tcp.parar();

@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/06/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: ClienteUDP
 * Funcao.............: Gerencia o envio e recepcao assincrona de datagramas UDP com alvo mutavel para failover.
 *************************************************************** */
@@ -95,6 +95,15 @@ public class ClienteUDP implements Runnable {
     return baos.toByteArray();
   }
 
+  /**
+   * Envia uma mensagem publica de texto via datagrama UDP para todos os membros de um grupo.
+   *
+   * @param nomeGrupo Nome do grupo de destino.
+   * @param usuario   Metadados locais do remetente.
+   * @param mensagem  Conteudo textual da mensagem.
+   * @return Identificador unico (UUID) atribuido a mensagem enviada.
+   * @throws exceptions.ConexaoException Caso ocorra falha de rede no disparo UDP.
+   */
   public String send(String nomeGrupo, InfoUser usuario, String mensagem) throws exceptions.ConexaoException {
     APDU apdu = new APDU("SEND", nomeGrupo, usuario.getNome(), mensagem, usuario.getPorta());
     try {
@@ -109,6 +118,15 @@ public class ClienteUDP implements Runnable {
     }
   }
 
+  /**
+   * Envia uma mensagem privada direta via datagrama UDP para um destinatario especifico.
+   *
+   * @param nomeDestinatario Codinome do destinatario alvo.
+   * @param usuario          Metadados locais do remetente.
+   * @param mensagem         Conteudo textual da mensagem privada.
+   * @return Identificador unico (UUID) atribuido a mensagem enviada.
+   * @throws exceptions.ConexaoException Caso ocorra falha de rede no disparo UDP.
+   */
   public String sendPvt(String nomeDestinatario, InfoUser usuario, String mensagem) throws exceptions.ConexaoException {
     APDU apdu = new APDU("SENDPVT", "@" + nomeDestinatario, usuario.getNome(), mensagem, usuario.getPorta(), nomeDestinatario);
     try {
@@ -123,6 +141,15 @@ public class ClienteUDP implements Runnable {
     }
   }
 
+  /**
+   * Envia uma mensagem publica de visualizacao unica (efemera) para um grupo via UDP.
+   *
+   * @param nomeGrupo Nome do grupo de destino.
+   * @param usuario   Metadados locais do remetente.
+   * @param mensagem  Conteudo efemero da mensagem.
+   * @return Identificador unico (UUID) atribuido a mensagem enviada.
+   * @throws exceptions.ConexaoException Caso ocorra falha de rede no disparo UDP.
+   */
   public String sendVu(String nomeGrupo, InfoUser usuario, String mensagem) throws exceptions.ConexaoException {
     APDU apdu = new APDU("SENDVU", nomeGrupo, usuario.getNome(), mensagem, usuario.getPorta(), true);
     try {
@@ -136,6 +163,15 @@ public class ClienteUDP implements Runnable {
     }
   }
 
+  /**
+   * Envia uma mensagem privada de visualizacao unica (efemera) para um destinatario via UDP.
+   *
+   * @param nomeDestinatario Codinome do destinatario alvo.
+   * @param usuario          Metadados locais do remetente.
+   * @param mensagem         Conteudo efemero da mensagem privada.
+   * @return Identificador unico (UUID) atribuido a mensagem enviada.
+   * @throws exceptions.ConexaoException Caso ocorra falha de rede no disparo UDP.
+   */
   public String sendPvtVu(String nomeDestinatario, InfoUser usuario, String mensagem) throws exceptions.ConexaoException {
     APDU apdu = new APDU("SENDPVT", "@" + nomeDestinatario, usuario.getNome(), mensagem, usuario.getPorta(), nomeDestinatario);
     apdu.setVisualizacaoUnica(true);
@@ -150,6 +186,14 @@ public class ClienteUDP implements Runnable {
     }
   }
 
+  /**
+   * Transmite via UDP um recibo de confirmacao de entrega (status 2) ou leitura (status 3).
+   *
+   * @param idMensagem         Identificador unico da mensagem confirmada.
+   * @param status             Codigo de confirmacao (2 = entregue, 3 = lida).
+   * @param nomeGrupoOuDestino Nome do grupo ou destino privado ({@code @usuario}).
+   * @param donoDaMensagem     Codinome do autor original da mensagem.
+   */
   public void sendConfirm(String idMensagem, int status, String nomeGrupoOuDestino, String donoDaMensagem) {
     if (idMensagem == null || idMensagem.isEmpty()) {
       return;
@@ -166,6 +210,9 @@ public class ClienteUDP implements Runnable {
     }
   }
 
+  /**
+   * Laco continuo de escuta assincrona de datagramas UDP para mensagens, ticks e eventos de failover.
+   */
   @Override
   public void run() {
     byte[] bufferRecepcao = new byte[BUFFER];
@@ -278,6 +325,9 @@ public class ClienteUDP implements Runnable {
     }
   }
 
+  /**
+   * Encerra o socket UDP local interrompendo a thread de escuta.
+   */
   public void fecharConexao() {
     this.socketUDP.close();
   }

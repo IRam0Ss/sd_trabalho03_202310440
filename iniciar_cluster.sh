@@ -125,7 +125,7 @@ echo "   E.D.E.N. (T#03) - INICIANDO CLUSTER PARTICIONADO (6 PROCESSOS)         
 echo "   Modo: ${MODO_FLAG:---local (bind 0.0.0.0)} | Execucao: ${TERMINAL_GUI:-background}"
 echo "=========================================================================="
 
-echo "[1/2] Iniciando 3 primeiros nós (Lideres Pioneiros dos Shards)..."
+echo "[1/2] Iniciando 3 primeiros nos (Lideres Pioneiros dos Shards)..."
 subir_no 1
 sleep 0.7
 subir_no 2
@@ -134,7 +134,7 @@ subir_no 3
 
 sleep 1.0
 
-echo "[2/2] Iniciando 3 nós seguintes (Replicas Standbys dos Shards)..."
+echo "[2/2] Iniciando 3 nos seguintes (Replicas Standbys dos Shards)..."
 subir_no 4
 sleep 0.7
 subir_no 5
@@ -144,6 +144,6 @@ subir_no 6
 echo "--------------------------------------------------------------------------"
 echo " Topologia de 6 processos disparada com sucesso!"
 echo " Para encerrar todos os nos de uma vez, execute: ./parar_cluster.sh"
-echo " Para iniciar um cliente JavaFX, execute: java -cp Cliente/bin App"
+echo " Para iniciar um cliente JavaFX, execute: java -cp Cliente/bin Principal"
 echo "=========================================================================="
 

@@ -1,5 +1,5 @@
 /**
- * Teste Automatizado: Verificação de Auto-LEAVE de todos os grupos na Desconexão Limpa
+ * Teste Automatizado: Verificacao de Auto-LEAVE de todos os grupos na Desconexao Limpa
  */
 
 import java.net.*;

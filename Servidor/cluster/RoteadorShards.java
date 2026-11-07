@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 05/11/2026
-* Ultima alteracao...: 05/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: RoteadorShards
 * Funcao.............: Roteamento de operacoes entre shards (proxy transparente), tabela de lideres e retry idempotente.
 *************************************************************** */
@@ -52,7 +52,7 @@ import utils.InfoUser;
  *   <li>{@link #executar(int, Operacao, long)}: executa a operacao no lider do shard dono (localmente se este no
  *       for o lider; senao envia ROTEAR_OP e aguarda RESP_OP), com redirecionamento, retry e timeout.</li>
  *   <li>Retries reutilizam o mesmo idCorrelacao; o destino guarda o resultado e nunca executa duas vezes.</li>
- *   <li>Shard sem lider alcancavel => Resultado de erro "particao indisponivel" (falha parcial).</li>
+ *   <li>Shard sem lider alcancavel retorna Resultado de erro "particao indisponivel" (falha parcial).</li>
  * </ul>
  * Enderecos de outros shards sao derivados da formula {@link PortasShard} e do host local.
  * 
@@ -151,6 +151,13 @@ public class RoteadorShards {
     }
   }
 
+  /**
+   * Inicializa o roteador inter-shard associando-o a topologia local e ao fornecedor de estado do consenso.
+   *
+   * @param config      Configuracao de topologia deste no.
+   * @param gerenciador Estrutura de dados local desta particao.
+   * @param ctx         Interface de consulta ao papel e epoca atuais do no.
+   */
   public RoteadorShards(ConfigCluster config, GerenciadorGrupos gerenciador, Contexto ctx) {
     this.config = config;
     this.gerenciador = gerenciador;
@@ -173,6 +180,9 @@ public class RoteadorShards {
   // CICLO DE VIDA / ANUNCIOS
   // =========================================================================
 
+  /**
+   * Inicia o ciclo periodico (~1s) de anuncio de lideranca inter-shard via TCP e broadcast LAN.
+   */
   public void iniciar() {
     Thread t = new Thread(() -> {
       while (executando) {
@@ -192,6 +202,9 @@ public class RoteadorShards {
     t.start();
   }
 
+  /**
+   * Encerra o pool de threads assincronas e fecha todas as conexoes TCP de roteamento entre shards.
+   */
   public void parar() {
     executando = false;
     pool.shutdownNow();
@@ -475,6 +488,13 @@ public class RoteadorShards {
   // LADO ORIGEM: executar operacao no shard dono
   // =========================================================================
 
+  /**
+   * Executa uma operacao de escrita no lider do shard destino utilizando o timeout padrao do cluster.
+   *
+   * @param shardDestino Indice do shard responsavel pela chave (0..2).
+   * @param op           Operacao idempotente a aplicar e replicar.
+   * @return {@link Resultado} devolvido pelo lider da particao destino.
+   */
   public Resultado executar(int shardDestino, Operacao op) {
     return executar(shardDestino, op, TIMEOUT_PADRAO_MS);
   }
@@ -612,6 +632,7 @@ public class RoteadorShards {
     public final List<InfoUser> membros;
     public final String erro;
 
+    /** Constroi o resultado tipado de listagem de membros de um grupo. */
     public ResultadoMembros(boolean sucesso, List<InfoUser> membros, String erro) {
       this.sucesso = sucesso;
       this.membros = (membros != null) ? membros : Collections.emptyList();
@@ -685,6 +706,16 @@ public class RoteadorShards {
     return consultarShard(shardDestino, tipo, parametro, null, timeoutMs);
   }
 
+  /**
+   * Consulta read-only ao lider de um shard especifico permitindo informar grupos esperados na sonda de sessao.
+   *
+   * @param shardDestino    Indice do shard consultado (0..2).
+   * @param tipo            Tipo de consulta read-only solicitada.
+   * @param parametro       Parametro textual da consulta (nome de grupo ou usuario).
+   * @param gruposEsperados Lista opcional de grupos que o usuario deve integrar neste shard.
+   * @param timeoutMs       Prazo maximo em milissegundos.
+   * @return {@link RespostaConsulta} ou {@code null} caso a particao esteja inacessivel.
+   */
   public RespostaConsulta consultarShard(int shardDestino, TipoConsulta tipo, String parametro,
       ArrayList<String> gruposEsperados, long timeoutMs) {
     Particionador.validarShard(shardDestino);
@@ -1068,7 +1099,7 @@ public class RoteadorShards {
    * <ul>
    *   <li>Se um shard estiver OFFLINE (inalcancavel), retorna {@code null} (preserva disponibilidade parcial CAP).</li>
    *   <li>Se um shard estiver ONLINE ({@code Status.OK}) mas tiver reiniciado sem o usuario/grupo na memoria
-   *       (amnesia volátil), retorna o motivo do erro para que o gateway derrube o socket TCP do cliente.</li>
+   *       (amnesia volatil), retorna o motivo do erro para que o gateway derrube o socket TCP do cliente.</li>
    * </ul>
    */
   public String verificarAmnesiaSessao(String nomeUsuario, Set<String> gruposAtivosSessao) {
@@ -1121,7 +1152,7 @@ public class RoteadorShards {
 
   /**
    * Notifica todos os shards (e executa localmente) o fechamento imediato do socket TCP do cliente
-   * cujo estado volátil desapareceu apos reinicio total de um shard, forcando Failover + Re-REGISTER/Re-JOIN.
+   * cujo estado volatil desapareceu apos reinicio total de um shard, forcando Failover + Re-REGISTER/Re-JOIN.
    */
   public void invalidarSessaoClienteGlobal(String nomeUsuario, String motivo) {
     if (!executando || nomeUsuario == null || nomeUsuario.trim().isEmpty()) {

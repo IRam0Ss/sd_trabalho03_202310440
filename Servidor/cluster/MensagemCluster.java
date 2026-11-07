@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: MensagemCluster
 * Funcao.............: Envelope de mensagem serializavel transmitida no canal TCP interno do cluster.
 *************************************************************** */
@@ -46,6 +46,12 @@ public class MensagemCluster implements Serializable {
     this.idShard = idShard;
   }
 
+  /**
+   * Constroi um novo envelope de mensagem interna carimbado com o instante local de emissao.
+   *
+   * @param tipo     Categoria da mensagem no protocolo de cluster.
+   * @param idOrigem Identificador global do no remetente.
+   */
   public MensagemCluster(TipoMensagemCluster tipo, int idOrigem) {
     this.tipo = tipo;
     this.idOrigem = idOrigem;

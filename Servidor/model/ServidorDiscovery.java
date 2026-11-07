@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/06/2026
-* Ultima alteracao...: 05/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: ServidorDiscovery
 * Funcao.............: Farol UDP para descoberta automatica do servidor local e nos do cluster/shard.
 *************************************************************** */
@@ -20,10 +20,10 @@ import cluster.TabelaLideres;
  * Thread de discovery local (farol UDP) com suporte a busca de cluster/shard,
  * compatibilidade legada e interoperabilidade universal com clientes heterogeneos (ex: Lucas).
  * Responde a:
- * - "QUEM_E_MESTRE_PARTICAO_X?" -> "MESTRE_PARTICAO_X" (ou IP proxy)
- * - "SERVIDOR_IP" -> "IP"
- * - "DISCOVER_EDEN" -> "EDEN_HERE"
- * - "DISCOVER_EDEN_CLUSTER" -> "EDEN_CLUSTER:id:papel:tcp:udp:idShard"
+ * - {@code "QUEM_E_MESTRE_PARTICAO_X?" -> "MESTRE_PARTICAO_X"} (ou IP proxy)
+ * - {@code "SERVIDOR_IP" -> "IP"}
+ * - {@code "DISCOVER_EDEN" -> "EDEN_HERE"}
+ * - {@code "DISCOVER_EDEN_CLUSTER" -> "EDEN_CLUSTER:id:papel:tcp:udp:idShard"}
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
  * @version 4.0
@@ -41,14 +41,22 @@ public class ServidorDiscovery implements Runnable {
   private String papel = "ATIVO";
   private TabelaLideres tabelaLideres;
 
+  /** Constroi o servico de discovery na porta padrao {@code 8888}. */
   public ServidorDiscovery() {
     this(Protocolo.PORTA_DISCOVERY, false);
   }
 
+  /** Constroi o servico de discovery na porta especificada em modo primario. */
   public ServidorDiscovery(int porta) {
     this(porta, false);
   }
 
+  /**
+   * Constroi o servico de discovery permitindo operar silenciosamente em modo fallback caso a porta esteja ocupada.
+   *
+   * @param porta        Porta UDP de escuta do farol.
+   * @param modoFallback Se {@code true}, suprime erros de bind caso outro lider local ja detenha a porta.
+   */
   public ServidorDiscovery(int porta, boolean modoFallback) {
     this.porta = porta;
     this.modoFallback = modoFallback;
@@ -58,10 +66,20 @@ public class ServidorDiscovery implements Runnable {
     this.tabelaLideres = tabela;
   }
 
+  /** Atualiza os metadados anunciados pelo farol assumindo Shard 0. */
   public void configurarInfo(int idNo, String papel, int portaTcp, int portaUdp) {
     configurarInfo(idNo, 0, papel, portaTcp, portaUdp);
   }
 
+  /**
+   * Configura a identidade do no, particao e portas de atendimento anunciadas nas respostas UDP.
+   *
+   * @param idNo     Identificador global do no.
+   * @param idShard  Indice da particao atendida (0..2).
+   * @param papel    Papel operacional atual (ex: {@code ATIVO}).
+   * @param portaTcp Porta TCP principal anunciada.
+   * @param portaUdp Porta UDP principal anunciada.
+   */
   public void configurarInfo(int idNo, int idShard, String papel, int portaTcp, int portaUdp) {
     this.idNo = idNo;
     this.idShard = idShard;
@@ -70,6 +88,7 @@ public class ServidorDiscovery implements Runnable {
     this.portaUdp = portaUdp;
   }
 
+  /** Encerra o socket UDP do farol de discovery. */
   public void parar() {
     this.executando = false;
     if (this.socket != null && !this.socket.isClosed()) {
@@ -81,6 +100,7 @@ public class ServidorDiscovery implements Runnable {
     System.out.println("[DISCOVERY:" + porta + "] Farol UDP encerrado.");
   }
 
+  /** Laco continuo de escuta e resposta multi-dialeto as sondas UDP de clientes na rede. */
   @Override
   public void run() {
     try {

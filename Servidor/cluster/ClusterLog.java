@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 16/10/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: ClusterLog
 * Funcao.............: Utilitario de logging elegante com timestamps [HH:mm:ss], badges semanticos e controle anti-spam.
 *************************************************************** */
@@ -35,46 +35,57 @@ public class ClusterLog {
     return "[" + FORMATO_HORA.format(new Date()) + "]";
   }
 
+  /** Registra mensagem informativa padronizada com tag semantica e timestamp. */
   public static void info(String tag, String mensagem) {
     System.out.println(timestamp() + " [" + tag + "] " + mensagem);
   }
 
+  /** Registra mensagem de alerta padronizada com tag semantica e timestamp. */
   public static void aviso(String tag, String mensagem) {
     System.out.println(timestamp() + " [" + tag + "] [AVISO] " + mensagem);
   }
 
+  /** Registra mensagem de erro na saida de erro padrao com tag semantica. */
   public static void erro(String tag, String mensagem) {
     System.err.println(timestamp() + " [" + tag + "] [ERRO] " + mensagem);
   }
 
+  /** Registra mensagem de erro acompanhada do resumo da excecao capturada. */
   public static void erro(String tag, String mensagem, Throwable t) {
     System.err.println(timestamp() + " [" + tag + "] [ERRO] " + mensagem + (t != null ? " (" + t.getMessage() + ")" : ""));
   }
 
+  /** Registra evento semantico associado ao papel de lider ativo da particao. */
   public static void lider(String mensagem) {
     System.out.println(timestamp() + " [LIDER ATIVO] " + mensagem);
   }
 
+  /** Registra evento semantico associado ao papel de replica em espera (Standby). */
   public static void standby(String mensagem) {
     System.out.println(timestamp() + " [STANDBY] " + mensagem);
   }
 
+  /** Registra evento semantico de coordenacao ou eleicao intra-shard. */
   public static void eleicao(String mensagem) {
     System.out.println(timestamp() + " [ELEICAO] " + mensagem);
   }
 
+  /** Registra evento semantico de sincronizacao ou replicacao primaria-backup. */
   public static void replicacao(String mensagem) {
     System.out.println(timestamp() + " [REPLICACAO] " + mensagem);
   }
 
+  /** Registra deteccao de divergencia ou dualidade temporaria de lideranca (Split-Brain). */
   public static void conflito(String mensagem) {
     System.out.println(timestamp() + " [SPLIT-BRAIN] [CONFLITO] " + mensagem);
   }
 
+  /** Registra convergencia e resolucao automatica de conflito de lideranca. */
   public static void cura(String mensagem) {
     System.out.println(timestamp() + " [SPLIT-BRAIN] [CURA] " + mensagem);
   }
 
+  /** Registra filtragem estrita de isolamento entre particoes distintas. */
   public static void isolamento(String mensagem) {
     System.out.println(timestamp() + " [ISOLAMENTO] " + mensagem);
   }

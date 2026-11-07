@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/06/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: GerenciadorGrupos
 * Funcao.............: Cerne unico de estado do servidor E.D.E.N. (usuarios, salas, bloqueios, mensagens e ticks).
 *************************************************************** */
@@ -99,16 +99,19 @@ public class GerenciadorGrupos implements Serializable {
     return this.ativo;
   }
 
+  /** Associa a instancia de sessao TCP ativa ao codinome normalizado do cliente conectado neste no. */
   public void vincularSessao(String nomeUsuario, Object sessao) {
     if (nomeUsuario == null || sessao == null) return;
     sessoesAtivas.put(normalizar(nomeUsuario), sessao);
   }
 
+  /** Remove o vinculo da sessao TCP local apenas se corresponder exatamente a instancia informada. */
   public void desvincularSessao(String nomeUsuario, Object sessao) {
     if (nomeUsuario == null || sessao == null) return;
     sessoesAtivas.remove(normalizar(nomeUsuario), sessao);
   }
 
+  /** Recupera a sessao TCP ativa associada ao usuario neste gateway de entrada, ou {@code null}. */
   public Object obterSessaoAtiva(String nomeUsuario) {
     if (nomeUsuario == null) return null;
     String busca = nomeUsuario.trim();
@@ -564,6 +567,10 @@ public class GerenciadorGrupos implements Serializable {
   // METODOS DE CONSULTA (READ-ONLY THREAD-SAFE)
   // =========================================================================
 
+  /**
+   * Retorna os metadados {@link InfoUser} de todos os membros de um grupo hospedado nesta particao,
+   * combinando usuarios locais e endpoints de membros cross-shard.
+   */
   public synchronized List<InfoUser> getTodosMembros(String nomeGrupo) {
     if (nomeGrupo == null || !grupos.containsKey(nomeGrupo)) {
       return new ArrayList<>();
@@ -583,6 +590,7 @@ public class GerenciadorGrupos implements Serializable {
     return lista;
   }
 
+  /** Retorna o conjunto de nomes normalizados dos integrantes de um grupo desta particao. */
   public synchronized Set<String> getMembrosNomes(String nomeGrupo) {
     if (nomeGrupo == null || !grupos.containsKey(nomeGrupo)) {
       return Collections.emptySet();
@@ -590,6 +598,7 @@ public class GerenciadorGrupos implements Serializable {
     return new HashSet<>(grupos.get(nomeGrupo));
   }
 
+  /** Verifica de forma case-insensitive se um usuario integra um grupo hospedado nesta particao. */
   public synchronized boolean isMembroGrupo(String nomeGrupo, String nomeUsuario) {
     if (nomeGrupo == null || nomeUsuario == null) {
       return false;
@@ -607,6 +616,10 @@ public class GerenciadorGrupos implements Serializable {
     return false;
   }
 
+  /**
+   * Resolve a lista de destinatarios UDP elegiveis para fan-out de mensagem em um grupo desta particao,
+   * validando a participacao do remetente e excluindo o proprio autor.
+   */
   public synchronized List<InfoUser> getMembrosEnvio(String nomeGrupo, InfoUser usuarioRemetente) {
     if (nomeGrupo == null || !grupos.containsKey(nomeGrupo)) {
       return new ArrayList<>();
@@ -635,6 +648,7 @@ public class GerenciadorGrupos implements Serializable {
     return destinatarios;
   }
 
+  /** Lista os nomes de todos os grupos publicos hospedados nesta particao. */
   public synchronized List<String> listarGrupos() {
     List<String> lista = new ArrayList<>();
     for (String g : grupos.keySet()) {
@@ -687,6 +701,7 @@ public class GerenciadorGrupos implements Serializable {
     mapa.putIfAbsent(chave, new InfoUser(info.getNome(), info.getIp().trim(), info.getPorta()));
   }
 
+  /** Busca um usuario registrado diretamente no mapa primario desta particao pelo codinome. */
   public synchronized InfoUser buscarUsuarioPorNome(String nome) {
     if (nome == null) {
       return null;
@@ -718,6 +733,7 @@ public class GerenciadorGrupos implements Serializable {
     return endpointsMembros.get(norm);
   }
 
+  /** Verifica em O(1) se existe bloqueio unilateral ou mutuo registrado entre dois usuarios. */
   public synchronized boolean isBloqueadoMutuo(String u1, String u2) {
     if (u1 == null || u2 == null) {
       return false;
@@ -748,32 +764,38 @@ public class GerenciadorGrupos implements Serializable {
   // RETROCOMPATIBILIDADE DE CODIGO (Delegam para aplicar)
   // =========================================================================
 
+  /** Atalho sincronizado de ingresso em grupo delegando ao pipeline deterministico {@link #aplicar(Operacao)}. */
   public synchronized boolean join(String nomeGrupo, InfoUser usuario) {
     Resultado r = aplicar(Operacao.entrarGrupo(null, nomeGrupo, usuario.getNome(), usuario.getIp(), usuario.getPorta()));
     return r.isSucesso();
   }
 
+  /** Atalho sincronizado de saida de grupo delegando ao pipeline deterministico {@link #aplicar(Operacao)}. */
   public synchronized boolean leave(String nomeGrupo, InfoUser usuario) {
     Resultado r = aplicar(Operacao.sairGrupo(null, nomeGrupo, usuario.getNome()));
     return r.isSucesso();
   }
 
+  /** Atalho sincronizado de registro de usuario delegando ao pipeline deterministico {@link #aplicar(Operacao)}. */
   public synchronized boolean registrarUsuario(InfoUser usuario) {
     Resultado r = aplicar(Operacao.registrarUsuario(null, usuario.getNome(), usuario.getIp(), usuario.getPorta()));
     return r.isSucesso();
   }
 
+  /** Atalho sincronizado de remocao de usuario delegando ao pipeline deterministico {@link #aplicar(Operacao)}. */
   public synchronized void removerUsuario(InfoUser usuario) {
     if (usuario != null) {
       aplicar(Operacao.removerUsuario(null, usuario.getNome()));
     }
   }
 
+  /** Atalho sincronizado de bloqueio de usuario delegando ao pipeline deterministico {@link #aplicar(Operacao)}. */
   public synchronized boolean bloquear(String bloqueador, String bloqueado) {
     Resultado r = aplicar(Operacao.bloquear(null, bloqueador, bloqueado));
     return r.isSucesso();
   }
 
+  /** Atalho sincronizado de desbloqueio de usuario delegando ao pipeline deterministico {@link #aplicar(Operacao)}. */
   public synchronized boolean desbloquear(String bloqueador, String bloqueado) {
     Resultado r = aplicar(Operacao.desbloquear(null, bloqueador, bloqueado));
     return r.isSucesso();

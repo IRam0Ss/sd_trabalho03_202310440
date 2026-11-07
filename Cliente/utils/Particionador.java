@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 06/11/2026
-* Ultima alteracao...: 06/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: Particionador
 * Funcao.............: Funcao de particao da ED no lado Cliente para conexao direta do Smart Client (S0, S1, S2).
 *************************************************************** */
@@ -75,19 +75,44 @@ public final class Particionador {
     return SHARD_PADRAO;
   }
 
+  /**
+   * Retorna a representacao textual da faixa alfabetica atendida pelo Shard informado.
+   *
+   * @param shard Indice do Shard (0, 1 ou 2).
+   * @return String da faixa alfabetica (ex: {@code A..I}).
+   */
   public static String faixa(int shard) {
     validarShard(shard);
     return FAIXAS[shard];
   }
 
+  /**
+   * Formata o rotulo canonico do Shard com sua respectiva faixa alfabetica.
+   *
+   * @param shard Indice do Shard (0, 1 ou 2).
+   * @return Rotulo formatado (ex: {@code S0 [A..I]}).
+   */
   public static String nome(int shard) {
     return "S" + shard + " [" + faixa(shard) + "]";
   }
 
+  /**
+   * Verifica se uma chave pertence deterministicamente ao Shard especificado.
+   *
+   * @param chave Nome do usuario ou grupo.
+   * @param shard Indice do Shard a testar (0, 1 ou 2).
+   * @return {@code true} caso a chave seja mapeada para o Shard informado.
+   */
   public static boolean pertence(String chave, int shard) {
     return shardDe(chave) == shard;
   }
 
+  /**
+   * Valida se o identificador de Shard pertence ao intervalo valido {@code [0, NUM_SHARDS - 1]}.
+   *
+   * @param shard Indice do Shard a validar.
+   * @throws IllegalArgumentException Caso o indice esteja fora do intervalo permitido.
+   */
   public static void validarShard(int shard) {
     if (shard < 0 || shard >= NUM_SHARDS) {
       throw new IllegalArgumentException("Shard invalido: " + shard + " (esperado 0, 1 ou 2)");

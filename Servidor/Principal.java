@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/06/2026
-* Ultima alteracao...: 05/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: Principal
 * Funcao.............: Ponto de entrada do Servidor T#03 com particionamento em 3 Shards e calculo dinamico de portas.
 *************************************************************** */
@@ -25,7 +25,7 @@ import utils.LogEstruturado;
  * Ponto de entrada do servidor E.D.E.N. (Trabalho 03 - Particionamento + Replicacao).
  * Filosofia Zero-Configuracao: descobre seu proprio ID automaticamente ao entrar na rede.
  * <ul>
- *   <li>Shard      = (ID - 1) % 3 (Ordem crescente: ID 1 -> S0 [A..I], ID 2 -> S1 [J..R], ID 3 -> S2 [S..Z], ID 4 -> S0 ...)</li>
+ *   <li>Shard      = {@code (ID - 1) % 3} (Ordem crescente: {@code ID 1 -> S0 [A..I], ID 2 -> S1 [J..R], ID 3 -> S2 [S..Z]})</li>
  *   <li>Replica    = (ID - 1) / 3</li>
  *   <li>TCP        = 5000 + ID</li>
  *   <li>UDP        = 6000 + ID</li>
@@ -43,6 +43,11 @@ import utils.LogEstruturado;
  */
 public class Principal {
 
+  /**
+   * Inicializa o processo servidor, realiza a auto-configuracao de Shard/Replica e inicia o console interativo.
+   *
+   * @param args Argumentos opcionais de linha de comando ({@code --local}, {@code --rede}, {@code --shard}, {@code --standby} ou ID).
+   */
   public static void main(String[] args) {
     System.setProperty("java.net.preferIPv4Stack", "true");
 

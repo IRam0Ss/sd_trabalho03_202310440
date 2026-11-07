@@ -1,4 +1,4 @@
-package scratch;
+
 
 import java.io.File;
 import java.net.Socket;
@@ -13,13 +13,13 @@ import utils.Protocolo;
 /**
  * Testador automatizado do ciclo de vida completo do cluster de servidores E.D.E.N.
  * Valida os 7 passos essenciais:
- * 1. Inicializacao dos 3 nós do cluster.
- * 2. Eleicao inicial deterministica (Nó 1 ATIVO, Nós 2 e 3 STANDBY).
+ * 1. Inicializacao dos 3 nos do cluster.
+ * 2. Eleicao inicial deterministica (No 1 ATIVO, Nos 2 e 3 STANDBY).
  * 3. Replicacao sincrona com quorum de ACKs de operacoes de clientes.
  * 4. Queda forcada do lider com kill -9.
- * 5. Deteccao de falha e eleicao automatica do novo lider (Nó 2).
+ * 5. Deteccao de falha e eleicao automatica do novo lider (No 2).
  * 6. Preservacao integral do estado de dados replicado.
- * 7. Retorno do Nó 1 e validacao da regra D1 (Nao-preempcao, entra como STANDBY).
+ * 7. Retorno do No 1 e validacao da regra D1 (Nao-preempcao, entra como STANDBY).
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
  */
@@ -58,7 +58,7 @@ public class TestadorClusterCompleto {
       System.out.println(">>> INICIANDO TESTE COMPLETO DE CLUSTER, REPLICACAO E FAILOVER <<<");
       System.out.println("==================================================================");
 
-      // 1. Inicia os 3 nós
+      // 1. Inicia os 3 nos
       System.out.println("\n[PASSO 1] Disparando Nó 1, Nó 2 e Nó 3...");
       Process p1 = iniciarNo(1, 3);
       processos.add(p1);
@@ -109,7 +109,7 @@ public class TestadorClusterCompleto {
 
       tcpCliente.fecharConexao();
 
-      // 4. Derrubar o lider ativo (Nó 1)
+      // 4. Derrubar o lider ativo (No 1)
       System.out.println("\n[PASSO 4] TESTE DE FAILOVER: Finalizando forcadamente o Nó 1 (kill -9)...");
       p1.destroyForcibly();
       p1.waitFor();
@@ -150,7 +150,7 @@ public class TestadorClusterCompleto {
       }
       System.out.println("[SUCESSO TOTAL] Estado integralmente preservado apos failover!");
 
-      // 7. Reiniciar o Nó 1 e validar D1 (Nao preempcao)
+      // 7. Reiniciar o No 1 e validar D1 (Nao preempcao)
       System.out.println("\n[PASSO 7] TESTE DE RECUPERACAO: Reiniciando Nó 1...");
       Process p1Novo = iniciarNo(1, 3);
       processos.add(p1Novo);

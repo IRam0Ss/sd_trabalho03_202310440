@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/06/2026
-* Ultima alteracao...: 05/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: Servidor
 * Funcao.............: Orquestrador de servicos de rede (TCP, UDP, Discovery) com suporte a ativacao/desativacao dinamica.
 *************************************************************** */
@@ -41,10 +41,16 @@ public class Servidor {
   private final List<ServidorDiscovery> servicosDiscovery = new ArrayList<>();
   private boolean servicosAtivos = false;
 
+  /** Constroi o orquestrador de servicos com uma instancia padrao de {@link GerenciadorGrupos}. */
   public Servidor() {
     this(new GerenciadorGrupos());
   }
 
+  /**
+   * Constroi o orquestrador de servicos vinculado ao gerenciador de estado da particao local.
+   *
+   * @param gerenciador Estrutura de dados particionada e replicada.
+   */
   public Servidor(GerenciadorGrupos gerenciador) {
     this.gerenciador = gerenciador;
   }
@@ -72,6 +78,9 @@ public class Servidor {
     iniciarServicos(Protocolo.PORTA_SERVIDOR_LEGACY, 6000, Protocolo.PORTA_DISCOVERY, true, 1, 0);
   }
 
+  /**
+   * Inicia os servicos de atendimento assumindo o Shard padrao 0.
+   */
   public synchronized void iniciarServicos(int portaTcp, int portaUdp, int portaDiscovery, boolean incluirLegado, int idNo) {
     iniciarServicos(portaTcp, portaUdp, portaDiscovery, incluirLegado, idNo, 0);
   }

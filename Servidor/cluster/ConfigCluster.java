@@ -1,10 +1,10 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 06/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: ConfigCluster
-* Funcao.............: Topologia Zero-Config: ID automatico (menor livre), shard = ID % 3 e portas derivadas do ID.
+* Funcao.............: Topologia Zero-Config: ID automatico (menor livre), shard = (ID - 1) % 3 e portas derivadas do ID.
 *************************************************************** */
 
 package cluster;
@@ -29,7 +29,7 @@ import utils.Protocolo;
  * Carrega e disponibiliza os metadados de conectividade de cada no dentro do seu Shard (T#03).
  * O no descobre sozinho seu ID global ao entrar na rede; dele derivam ({@link PortasShard}):
  * <ul>
- *   <li>idShard    = ID % 3  (ID 1 -> S1, ID 2 -> S2, ID 3 -> S0, ...)</li>
+ *   <li>idShard    = {@code (ID - 1) % 3} ({@code ID 1 -> S0 [A..I], ID 2 -> S1 [J..R], ID 3 -> S2 [S..Z]})</li>
  *   <li>TCP        = 5000 + ID</li>
  *   <li>UDP        = 6000 + ID</li>
  *   <li>ClusterLAN = 7000 + ID</li>
@@ -59,6 +59,18 @@ public class ConfigCluster implements Serializable {
     public final int portaUdp;
     public final int portaDiscovery;
 
+    /**
+     * Inicializa os metadados imutaveis de conectividade de um processo servidor.
+     *
+     * @param id             Identificador global do no (1..99).
+     * @param idShard        Indice da particao (0..2).
+     * @param idReplica      Indice da replica dentro do shard (0..N).
+     * @param host           Endereco IP ou host anunciado.
+     * @param portaCluster   Porta TCP interna de comunicacao do cluster.
+     * @param portaTcp       Porta TCP de atendimento a clientes.
+     * @param portaUdp       Porta UDP de atendimento a clientes.
+     * @param portaDiscovery Porta UDP base do servico de discovery.
+     */
     public NoInfo(int id, int idShard, int idReplica, String host, int portaCluster, int portaTcp, int portaUdp,
         int portaDiscovery) {
       this.id = id;
@@ -83,6 +95,14 @@ public class ConfigCluster implements Serializable {
   private final int idReplica;
   private final Map<Integer, NoInfo> nos;
 
+  /**
+   * Constroi a configuracao de topologia local para a particao e replica atribuidas ao processo.
+   *
+   * @param meuId     Identificador global deste no.
+   * @param idShard   Indice do shard (0, 1 ou 2).
+   * @param idReplica Indice da replica neste shard.
+   * @param nos       Mapa inicial de nos conhecidos no mesmo shard.
+   */
   public ConfigCluster(int meuId, int idShard, int idReplica, Map<Integer, NoInfo> nos) {
     Particionador.validarShard(idShard);
     this.meuId = meuId;
@@ -101,7 +121,7 @@ public class ConfigCluster implements Serializable {
     return idReplica;
   }
 
-  /** ID global do no (1..99), atribuido automaticamente. Shard = ID % 3. */
+  /** ID global do no (1..99), atribuido automaticamente. Shard = (ID - 1) % 3. */
   public int getMeuId() {
     return meuId;
   }
@@ -180,7 +200,7 @@ public class ConfigCluster implements Serializable {
   }
 
   // ===========================================================================
-  // INICIALIZACAO AUTONOMA (ZERO-CONFIG): ID automatico -> shard = ID % 3
+  // INICIALIZACAO AUTONOMA (ZERO-CONFIG): ID automatico -> shard = (ID - 1) % 3
   // ===========================================================================
 
   /** Socket do canal de cluster reservado durante a escolha do ID (evita corrida entre nos simultaneos). */
@@ -249,6 +269,13 @@ public class ConfigCluster implements Serializable {
     return descobrirEConfigurarAutomatico(null, null, null, forcarLoopback);
   }
 
+  /**
+   * Descobre e configura a topologia local permitindo informar opcionalmente um ID global forcado.
+   *
+   * @param idForcado      ID global opcional (ou {@code null} para atribuicao automatica).
+   * @param forcarLoopback Se {@code true}, anuncia {@code 127.0.0.1}; caso contrario anuncia o IP da LAN.
+   * @return Instancia configurada de {@link ConfigCluster}.
+   */
   public static synchronized ConfigCluster descobrirEConfigurarAutomatico(Integer idForcado, boolean forcarLoopback) {
     return descobrirEConfigurarAutomatico(idForcado, null, null, forcarLoopback);
   }

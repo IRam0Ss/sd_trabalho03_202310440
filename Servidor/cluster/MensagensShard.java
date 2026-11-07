@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 05/11/2026
-* Ultima alteracao...: 05/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: MensagensShard
 * Funcao.............: Payloads serializaveis da comunicacao entre shards (anuncio, pedido roteado, resposta).
 *************************************************************** */
@@ -39,10 +39,16 @@ public final class MensagensShard {
     public final int idLiderConhecido;
     public final String host;
 
+    /**
+     * Constroi um anuncio de topologia de shard sem host explicito.
+     */
     public AnuncioShard(int idShard, int idNo, String papel, long epoca, int idLiderConhecido) {
       this(idShard, idNo, papel, epoca, idLiderConhecido, null);
     }
 
+    /**
+     * Constroi um anuncio completo de topologia de shard incluindo o host fisico anunciado.
+     */
     public AnuncioShard(int idShard, int idNo, String papel, long epoca, int idLiderConhecido, String host) {
       this.idShard = idShard;
       this.idNo = idNo;
@@ -65,6 +71,9 @@ public final class MensagensShard {
     public final int shardOrigem;
     public final int idNoOrigem;
 
+    /**
+     * Constroi um pedido de mutacao roteada entre shards com correlacao idempotente.
+     */
     public PedidoRoteado(String idCorrelacao, int shardDestino, Operacao operacao, String hostResposta,
         int portaResposta, int shardOrigem, int idNoOrigem) {
       this.idCorrelacao = idCorrelacao;
@@ -88,6 +97,7 @@ public final class MensagensShard {
     ERRO
   }
 
+  /** Resposta retornada pelo no destino apos processar ou redirecionar um {@link PedidoRoteado}. */
   public static class RespostaRoteada implements Serializable {
     private static final long serialVersionUID = 1L;
     public final String idCorrelacao;
@@ -96,6 +106,9 @@ public final class MensagensShard {
     public final int idLider;
     public final String erro;
 
+    /**
+     * Constroi o envelope de resposta de uma operacao roteada inter-shard.
+     */
     public RespostaRoteada(String idCorrelacao, Status status, Resultado resultado, int idLider, String erro) {
       this.idCorrelacao = idCorrelacao;
       this.status = status;
@@ -126,11 +139,17 @@ public final class MensagensShard {
     public final int shardOrigem;
     public final int idNoOrigem;
 
+    /**
+     * Constroi um pedido de consulta read-only inter-shard.
+     */
     public PedidoConsulta(String idCorrelacao, int shardDestino, TipoConsulta tipo, String parametro,
         String hostResposta, int portaResposta, int shardOrigem, int idNoOrigem) {
       this(idCorrelacao, shardDestino, tipo, parametro, null, hostResposta, portaResposta, shardOrigem, idNoOrigem);
     }
 
+    /**
+     * Constroi um pedido de consulta read-only inter-shard incluindo lista opcional de grupos esperados.
+     */
     public PedidoConsulta(String idCorrelacao, int shardDestino, TipoConsulta tipo, String parametro,
         ArrayList<String> gruposEsperados, String hostResposta, int portaResposta, int shardOrigem, int idNoOrigem) {
       this.idCorrelacao = idCorrelacao;
@@ -157,11 +176,17 @@ public final class MensagensShard {
     public final boolean sessaoValida;
     public final String motivoInvalidez;
 
+    /**
+     * Constroi a resposta de leitura de um shard consultado assumindo sessao valida.
+     */
     public RespostaConsulta(String idCorrelacao, Status status, int idLider, ArrayList<String> grupos,
         ArrayList<InfoUser> usuarios, String erro) {
       this(idCorrelacao, status, idLider, grupos, usuarios, erro, true, null);
     }
 
+    /**
+     * Constroi a resposta completa de leitura de um shard consultado incluindo diagnostico de sessao.
+     */
     public RespostaConsulta(String idCorrelacao, Status status, int idLider, ArrayList<String> grupos,
         ArrayList<InfoUser> usuarios, String erro, boolean sessaoValida, String motivoInvalidez) {
       this.idCorrelacao = idCorrelacao;
@@ -186,6 +211,9 @@ public final class MensagensShard {
     public final String motivo;
     public final int shardOrigem;
 
+    /**
+     * Constroi um evento de invalidacao de sessao para derrubar o socket TCP do cliente afetado por amnesia.
+     */
     public InvalidaSessaoCliente(String idEvento, String nomeUsuario, String motivo, int shardOrigem) {
       this.idEvento = idEvento;
       this.nomeUsuario = nomeUsuario;
@@ -207,6 +235,9 @@ public final class MensagensShard {
     public final int portaUdpCliente;
     public final int saltos;
 
+    /**
+     * Constroi um envelope de encaminhamento UDP inter-shard com controle anti-loop por saltos.
+     */
     public PacoteUdpRoteado(String idPacote, int shardDestino, APDU apdu,
         String ipCliente, int portaUdpCliente, int saltos) {
       this.idPacote = idPacote;

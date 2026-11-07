@@ -1,4 +1,4 @@
-package scratch;
+
 
 import java.io.File;
 import java.util.ArrayList;
@@ -11,13 +11,13 @@ import utils.Protocolo;
 
 /**
  * Valida a geracao automatica de IDs e o crescimento dinamico do cluster (N indefinido):
- * - Nós iniciados sem qualquer argumento manual de ID ou total.
- * - Primeiro nó assume ID 1 automaticamente.
- * - Segundo nó detecta porta 9001 ocupada e assume ID 2 automaticamente.
- * - Terceiro nó assume ID 3 automaticamente.
- * - Quarto nó assume ID 4 automaticamente (cluster de 4 nós dinamico).
- * - Operacoes replicadas para todos os 4 nós.
- * - Queda do líder e failover entre os sobreviventes.
+ * - Nos iniciados sem qualquer argumento manual de ID ou total.
+ * - Primeiro no assume ID 1 automaticamente.
+ * - Segundo no detecta porta 9001 ocupada e assume ID 2 automaticamente.
+ * - Terceiro no assume ID 3 automaticamente.
+ * - Quarto no assume ID 4 automaticamente (cluster de 4 nos dinamico).
+ * - Operacoes replicadas para todos os 4 nos.
+ * - Queda do lider e failover entre os sobreviventes.
  */
 public class TesteAutoIdEDinamico {
 
@@ -98,7 +98,7 @@ public class TesteAutoIdEDinamico {
       System.out.println("  -> Grupos no Nó 1: " + listG.getTextoMensagem());
       tcp.fecharConexao();
 
-      // Derruba nó 1
+      // Derruba no 1
       System.out.println("\n7. Derrubando Nó 1 forcada (kill)...");
       p1.destroyForcibly();
       p1.waitFor();

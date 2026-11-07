@@ -1,6 +1,0 @@
-[1m[SHARD-1 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [33m[10:33:34] [CONFIG] Iniciando Shard: S1 | Replica: 0 | Portas: TCP=5100, UDP=6100, Cluster=7100[0m
-[1m[SHARD-1 | REPLICA-0 | [35mINICIANDO[0m[1m][0m Particao ativa neste processo: S1 [J..R][0m
-[1m[SHARD-1 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [10:33:34] [BEACON:SHARD] Farol intra-shard S1 escutando na porta UDP 9886[0m
-[1m[SHARD-1 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [CLUSTER:TCP] [INFO] Canal de cluster escutando em 0.0.0.0:7100 (host anunciado: 127.0.0.1)[0m
-[1m[SHARD-1 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [SISTEMA] Servidor iniciado. Digite 'status', 'lideres', 'shards', 'estado', 'ajuda' ou 'sair'.[0m
-[1m[SHARD-1 | REPLICA-0 | [35mINICIANDO[0m[1m][0m [10:33:34] [HEARTBEAT] Cluster operacional: 1/2 nos ativos | Lider atual: NENHUM[0m

@@ -30,7 +30,7 @@ public class TesteClienteBurroUniversal {
       System.out.println("[SETUP] Aguardando eleição dos líderes nos 3 shards...");
       Thread.sleep(2500);
 
-      // 1. Discovery Universal (Broadcast Universal - o primeiro líder que responder é aceito!)
+      // 1. Discovery Universal (Broadcast Universal - o primeiro lider que responder e aceito!)
       System.out.println("\n--- 1. Discovery UDP Universal pelo Cliente ---");
       List<EnderecoServidor> descobertos = GerenciadorConexao.descobrirServidoresViaUDP(1200);
       System.out.println("Servidores descobertos via UDP: " + descobertos);
@@ -43,8 +43,8 @@ public class TesteClienteBurroUniversal {
       System.out.println("Cliente conectará na primeira porta de entrada que respondeu: "
           + entrada.host + ":" + entrada.portaTcp + " (Shard S" + entrada.idShard + ")");
 
-      // 2. Conexão TCP e Registro de usuário de QUALQUER shard
-      // Testamos registrar um usuário do Shard 0 (Alice), mesmo se caiu no Shard 1 ou 2!
+      // 2. Conexao TCP e Registro de usuario de QUALQUER shard
+      // Testamos registrar um usuario do Shard 0 (Alice), mesmo se caiu no Shard 1 ou 2!
       System.out.println("\n--- 2. Conexão e Registro (Proxy Transparente garantido pelo Servidor) ---");
       ClienteTCP tcp = new ClienteTCP(entrada.host, entrada.portaTcp);
       ClienteUDP udp = new ClienteUDP(entrada.host, entrada.portaUdp);
@@ -66,7 +66,7 @@ public class TesteClienteBurroUniversal {
       tcp.fecharConexao();
       udp.fecharConexao();
 
-      // 4. Teste Cross-Shard Explicito: Conecta no Shard S1 (TCP 5001) para registrar usuário 'Zeca' (que pertence ao Shard S2 [S..Z])
+      // 4. Teste Cross-Shard Explicito: Conecta no Shard S1 (TCP 5001) para registrar usuario 'Zeca' (que pertence ao Shard S2 [S..Z])
       System.out.println("\n--- 4. Conexão no Shard S1 (5001) com usuário do Shard S2 ('Zeca') ---");
       ClienteTCP tcpS1 = new ClienteTCP("127.0.0.1", 5001);
       ClienteUDP udpS1 = new ClienteUDP("127.0.0.1", 6001);
@@ -78,7 +78,7 @@ public class TesteClienteBurroUniversal {
         throw new RuntimeException("Falha no proxy cross-shard S1 -> S2!");
       }
 
-      // Consulta USERS através de S1: deve conter Alice (de S0) e Zeca (de S2)!
+      // Consulta USERS atraves de S1: deve conter Alice (de S0) e Zeca (de S2)!
       APDU usersCross = tcpS1.listUsers();
       System.out.println("Scatter-gather USERS via S1: " + (usersCross != null ? usersCross.getTextoMensagem() : "null"));
 

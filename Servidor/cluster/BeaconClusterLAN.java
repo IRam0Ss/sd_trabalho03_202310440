@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 05/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: BeaconClusterLAN
 * Funcao.............: Farol UDP em broadcast com filtragem estrita por idShard para descoberta intra-shard.
 *************************************************************** */
@@ -78,10 +78,23 @@ public class BeaconClusterLAN {
     return Protocolo.PORTA_CLUSTER_BEACON + (idShard * 10);
   }
 
+  /**
+   * Calcula a porta UDP dedicada do farol intra-shard para uma replica especifica ({@code portaBase + idReplica + 1}).
+   *
+   * @param idShard   Indice do shard (0..2).
+   * @param idReplica Indice da replica (0..N).
+   * @return Porta UDP dedicada do farol da replica.
+   */
   public static int portaBeaconDe(int idShard, int idReplica) {
     return portaBeaconShard(idShard) + idReplica + 1;
   }
 
+  /**
+   * Inicializa o servico de farol UDP intra-shard e registra os pares previamente conhecidos.
+   *
+   * @param config   Configuracao de topologia deste no.
+   * @param listener Ouvinte notificado sobre entrada, saida ou anuncios de nos na rede.
+   */
   public BeaconClusterLAN(ConfigCluster config, ListenerNovoParLAN listener) {
     this.config = config;
     this.meuId = config.getMeuId();
@@ -278,7 +291,7 @@ public class BeaconClusterLAN {
    * Dispara multiplas ondas de probes para portas intra-shard (9876, 9886, 9896) e Discovery geral (8888, 5001),
    * coletando tanto respostas diretas quanto anuncios ambientais que estejam circulando na rede.
    *
-   * @return mapa ID global -> metadados de todos os nos vivos que responderam.
+   * @return mapa {@code ID global -> metadados} de todos os nos vivos que responderam.
    */
   public static Map<Integer, ConfigCluster.NoInfo> sondarTodosOsNos(int janelaMs) {
     Map<Integer, ConfigCluster.NoInfo> encontrados = new HashMap<>();
@@ -590,6 +603,9 @@ public class BeaconClusterLAN {
     }
   }
 
+  /**
+   * Inicia uma thread periodica que anuncia continuamente a presenca deste no no mesmo shard via UDP.
+   */
   public void anunciarPresenca() {
     new Thread(() -> {
       while (executando) {
@@ -634,6 +650,9 @@ public class BeaconClusterLAN {
     }, "Thread-AnunciarPresencaLAN-S" + meuShard).start();
   }
 
+  /**
+   * Emite um aviso UDP imediato de saida graciosa ({@code EDEN_CLUSTER_LEAVE}) para acelerar o failover no shard.
+   */
   public void anunciarSaida() {
     try (DatagramSocket s = new DatagramSocket(null)) {
       s.setReuseAddress(true);
@@ -746,6 +765,9 @@ public class BeaconClusterLAN {
     }
   }
 
+  /**
+   * Anuncia a saida graciosa e encerra os sockets UDP de escuta do farol intra-shard.
+   */
   public void parar() {
     if (this.executando) {
       anunciarSaida();

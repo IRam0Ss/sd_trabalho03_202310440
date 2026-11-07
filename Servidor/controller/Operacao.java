@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: Operacao
 * Funcao.............: Modela uma mutacao determinista de estado a ser aplicada e replicada no cluster.
 *************************************************************** */
@@ -44,6 +44,12 @@ public class Operacao implements Serializable {
   private Set<String> esperados;
   private boolean visualizacaoUnica;
 
+  /**
+   * Constroi uma operacao deterministica de transicao de estado identificada por chave de requisicao.
+   *
+   * @param tipo         Categoria da mutacao no estado.
+   * @param idRequisicao Identificador unico para deduplicacao idempotente (opcional para eventos internos).
+   */
   public Operacao(TipoOperacao tipo, String idRequisicao) {
     this.tipo = tipo;
     this.idRequisicao = idRequisicao;
@@ -52,6 +58,7 @@ public class Operacao implements Serializable {
 
   // --- Metodos Fabrica ---
 
+  /** Cria operacao deterministica de cadastro ou renovacao de sessao de usuario. */
   public static Operacao registrarUsuario(String idReq, String nome, String ip, int porta) {
     Operacao op = new Operacao(TipoOperacao.REGISTRAR_USUARIO, idReq);
     op.nomeUsuario = nome;
@@ -60,12 +67,14 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao deterministica de remocao de usuario e faxina de participacao em salas. */
   public static Operacao removerUsuario(String idReq, String nome) {
     Operacao op = new Operacao(TipoOperacao.REMOVER_USUARIO, idReq);
     op.nomeUsuario = nome;
     return op;
   }
 
+  /** Cria operacao deterministica de ingresso de usuario em grupo com cache de endpoint UDP. */
   public static Operacao entrarGrupo(String idReq, String nomeGrupo, String nomeUsuario, String ip, int porta) {
     Operacao op = new Operacao(TipoOperacao.ENTRAR_GRUPO, idReq);
     op.nomeGrupo = nomeGrupo;
@@ -75,6 +84,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao deterministica de saida de usuario de um grupo especifico (ou {@code GLOBAL}). */
   public static Operacao sairGrupo(String idReq, String nomeGrupo, String nomeUsuario) {
     Operacao op = new Operacao(TipoOperacao.SAIR_GRUPO, idReq);
     op.nomeGrupo = nomeGrupo;
@@ -82,6 +92,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao deterministica de bloqueio de mensagens entre dois usuarios. */
   public static Operacao bloquear(String idReq, String bloqueador, String bloqueado) {
     Operacao op = new Operacao(TipoOperacao.BLOQUEAR, idReq);
     op.nomeUsuario = bloqueador;
@@ -89,6 +100,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao deterministica de revogacao de bloqueio entre dois usuarios. */
   public static Operacao desbloquear(String idReq, String bloqueador, String bloqueado) {
     Operacao op = new Operacao(TipoOperacao.DESBLOQUEAR, idReq);
     op.nomeUsuario = bloqueador;
@@ -96,6 +108,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao de atualizacao de endpoint UDP conhecido para um usuario. */
   public static Operacao atualizarEndpoint(String nome, String ip, int porta) {
     Operacao op = new Operacao(TipoOperacao.ATUALIZAR_ENDPOINT, null);
     op.nomeUsuario = nome;
@@ -104,10 +117,12 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao de rastreamento de confirmacoes de entrega/leitura para mensagem de grupo. */
   public static Operacao registrarMsgGrupo(String idMensagem, String autor, String nomeGrupo, Set<String> esperados, boolean vu) {
     return registrarMsgGrupo(idMensagem, autor, null, 0, nomeGrupo, esperados, vu);
   }
 
+  /** Cria operacao completa de rastreamento de mensagem de grupo preservando o endpoint UDP do autor. */
   public static Operacao registrarMsgGrupo(String idMensagem, String autor, String ipAutor, int portaAutor,
       String nomeGrupo, Set<String> esperados, boolean vu) {
     Operacao op = new Operacao(TipoOperacao.REGISTRAR_MSG_GRUPO, idMensagem);
@@ -121,10 +136,12 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao de rastreamento de confirmacoes para mensagem privada direta. */
   public static Operacao registrarMsgPrivada(String idMensagem, String autor, String destinatario) {
     return registrarMsgPrivada(idMensagem, autor, null, 0, destinatario);
   }
 
+  /** Cria operacao completa de rastreamento de mensagem privada preservando o endpoint UDP do autor. */
   public static Operacao registrarMsgPrivada(String idMensagem, String autor, String ipAutor, int portaAutor, String destinatario) {
     Operacao op = new Operacao(TipoOperacao.REGISTRAR_MSG_PRIVADA, idMensagem);
     op.idMensagem = idMensagem;
@@ -135,6 +152,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao de contabilizacao de recibo de entrega (status 2) para uma mensagem. */
   public static Operacao confirmarEntrega(String idMensagem, String confirmador) {
     Operacao op = new Operacao(TipoOperacao.CONFIRMAR_ENTREGA, null);
     op.idMensagem = idMensagem;
@@ -143,6 +161,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao de contabilizacao de recibo de leitura (status 3) para uma mensagem. */
   public static Operacao confirmarLeitura(String idMensagem, String confirmador) {
     Operacao op = new Operacao(TipoOperacao.CONFIRMAR_LEITURA, null);
     op.idMensagem = idMensagem;
@@ -151,6 +170,7 @@ public class Operacao implements Serializable {
     return op;
   }
 
+  /** Cria operacao deterministica de expurgo de registros antigos de confirmacao por limite temporal. */
   public static Operacao limparMensagens(long timestampLimite) {
     Operacao op = new Operacao(TipoOperacao.LIMPAR_MENSAGENS, null);
     op.timestamp = timestampLimite;

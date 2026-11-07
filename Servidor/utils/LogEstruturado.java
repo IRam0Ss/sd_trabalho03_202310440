@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 05/11/2026
-* Ultima alteracao...: 05/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: LogEstruturado
 * Funcao.............: Redireciona System.out/err prefixando TODA linha com [SHARD-x | REPLICA-y | PAPEL] e cores ANSI.
 *************************************************************** */
@@ -144,6 +144,7 @@ public final class LogEstruturado {
       this.erroStream = erroStream;
     }
 
+    /** Processa um byte de saida e dispara a emissao formatada ao encontrar quebra de linha. */
     @Override
     public synchronized void write(int b) {
       if (b == '\n') {
@@ -153,6 +154,7 @@ public final class LogEstruturado {
       }
     }
 
+    /** Processa uma sequencia de bytes delegando byte a byte ao acumulador de linha. */
     @Override
     public synchronized void write(byte[] b, int off, int len) {
       for (int i = off; i < off + len; i++) {
@@ -160,6 +162,7 @@ public final class LogEstruturado {
       }
     }
 
+    /** Retem linhas parciais no buffer ate que o caractere de fim de linha seja recebido. */
     @Override
     public synchronized void flush() {
       // linhas parciais so sao emitidas ao receber '\n'

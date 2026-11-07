@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 06/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: GerenciadorConexao
 * Funcao.............: Orquestrador de Discovery UDP (6 campos com Shard) e failover transparente do cliente.
 *************************************************************** */
@@ -37,7 +37,7 @@ import utils.Protocolo;
  * Orquestrador da camada de rede do cliente com Discovery UDP automatico e failover cross-shard.
  * <ul>
  *   <li>Extrai o 6o campo ({@code idShard}) do farol {@code EDEN_CLUSTER:<id>:<estado>:<tcp>:<udp>:<shard>}.</li>
- *   <li>Ao capturar queda do socket TCP (IOException, SocketException, EOFException) ou falha no PING,
+ *   <li>Ao capturar queda do socket TCP (IOException, SocketException, EOFException ou fechamento FIN/EOF),
  *       limpa a conexao quebrada, dispara novo Discovery UDP automatico e reconecta a qualquer lider de
  *       Shard ativo disponivel na rede.</li>
  * </ul>
@@ -47,6 +47,9 @@ import utils.Protocolo;
  */
 public class GerenciadorConexao {
 
+  /**
+   * Representa o endpoint de rede e metadados de particao de um servidor descoberto no cluster.
+   */
   public static class EnderecoServidor {
     public final String host;
     public final int portaTcp;
@@ -55,10 +58,26 @@ public class GerenciadorConexao {
     public final int idShard;
     public final String estado;
 
+    /**
+     * Constroi um descritor de servidor inferindo automaticamente o Shard a partir da porta TCP.
+     *
+     * @param host     Endereco IP ou host do servidor.
+     * @param portaTcp Porta TCP de atendimento.
+     * @param portaUdp Porta UDP de atendimento.
+     */
     public EnderecoServidor(String host, int portaTcp, int portaUdp) {
       this(host, portaTcp, portaUdp, inferirShardPorPortaTcp(portaTcp), "ATIVO");
     }
 
+    /**
+     * Constroi um descritor completo de servidor com identificacao explicita de Shard e estado.
+     *
+     * @param host     Endereco IP ou host do servidor.
+     * @param portaTcp Porta TCP de atendimento.
+     * @param portaUdp Porta UDP de atendimento.
+     * @param idShard  Indice da particao (0, 1, 2 ou -1 se desconhecido).
+     * @param estado   Papel operacional annunciato (ATIVO ou STANDBY).
+     */
     public EnderecoServidor(String host, int portaTcp, int portaUdp, int idShard, String estado) {
       this.host = host;
       this.portaTcp = portaTcp;
@@ -100,12 +119,31 @@ public class GerenciadorConexao {
   private volatile boolean ultimoFailoverSucesso = false;
   private volatile boolean executando = true;
 
+  /**
+   * Inicializa o gerenciador inferindo o Shard inicial a partir da porta TCP conectada.
+   *
+   * @param servidoresIniciais Lista inicial de endpoints conhecidos no cluster.
+   * @param tcp                Canal TCP ativo do cliente.
+   * @param udp                Canal UDP ativo do cliente.
+   * @param usuario            Metadados locais da sessao do usuario.
+   * @param listener           Ouvinte de eventos para sincronizacao da interface grafica.
+   */
   public GerenciadorConexao(List<EnderecoServidor> servidoresIniciais, ClienteTCP tcp, ClienteUDP udp,
       InfoUser usuario, MessageListener listener) {
     this(servidoresIniciais, tcp, udp, usuario, listener,
         tcp != null ? inferirShardPorPortaTcp(tcp.getPortaServidor()) : -1);
   }
 
+  /**
+   * Inicializa o gerenciador com identificacao explicita da particao da porta de entrada.
+   *
+   * @param servidoresIniciais Lista inicial de endpoints conhecidos no cluster.
+   * @param tcp                Canal TCP ativo do cliente.
+   * @param udp                Canal UDP ativo do cliente.
+   * @param usuario            Metadados locais da sessao do usuario.
+   * @param listener           Ouvinte de eventos para sincronizacao da interface grafica.
+   * @param idShardInicial     Indice do Shard da porta de entrada inicial.
+   */
   public GerenciadorConexao(List<EnderecoServidor> servidoresIniciais, ClienteTCP tcp, ClienteUDP udp,
       InfoUser usuario, MessageListener listener, int idShardInicial) {
     if (servidoresIniciais != null) {
@@ -128,6 +166,12 @@ public class GerenciadorConexao {
   // UTILITARIOS DE PORTAS E DISCOVERY UDP (6 CAMPOS COM SHARD)
   // =========================================================================
 
+  /**
+   * Calcula a porta UDP correspondente a uma porta TCP segundo a algebra de portas do cluster.
+   *
+   * @param pTcp Porta TCP de atendimento do servidor.
+   * @return Porta UDP associada ao mesmo processo servidor.
+   */
   public static int calcularPortaUdpPadrao(int pTcp) {
     if (pTcp >= 5000 && pTcp < 5300) {
       return pTcp + 1000;
@@ -141,6 +185,12 @@ public class GerenciadorConexao {
     return pTcp + (Protocolo.PORTA_SERVIDOR_UDP - Protocolo.PORTA_SERVIDOR_TCP);
   }
 
+  /**
+   * Infere o indice do Shard (0, 1 ou 2) a partir do numero da porta TCP do servidor.
+   *
+   * @param pTcp Porta TCP do servidor.
+   * @return Indice do Shard (0..2) ou -1 caso nao seja possivel inferir.
+   */
   public static int inferirShardPorPortaTcp(int pTcp) {
     if (pTcp > 5000 && pTcp < 5100) {
       int id = pTcp - 5000;
@@ -362,15 +412,35 @@ public class GerenciadorConexao {
   // REGISTRO DE SERVIDORES E MONITORAMENTO DE SESSAO
   // =========================================================================
 
+  /**
+   * Registra um endpoint de servidor na cache local inferindo automaticamente seu Shard.
+   *
+   * @param host     Endereco IP ou hostname do servidor.
+   * @param portaTcp Porta TCP de atendimento.
+   * @param portaUdp Porta UDP de atendimento.
+   */
   public void adicionarServidor(String host, int portaTcp, int portaUdp) {
     adicionarServidor(host, portaTcp, portaUdp, inferirShardPorPortaTcp(portaTcp));
   }
 
+  /**
+   * Registra um endpoint de servidor na cache local com identificacao explicita de Shard.
+   *
+   * @param host     Endereco IP ou hostname do servidor.
+   * @param portaTcp Porta TCP de atendimento.
+   * @param portaUdp Porta UDP de atendimento.
+   * @param idShard  Indice do Shard (0..2).
+   */
   public void adicionarServidor(String host, int portaTcp, int portaUdp, int idShard) {
     if (host == null || host.trim().isEmpty()) return;
     adicionarOuAtualizarServidor(new EnderecoServidor(host.trim(), portaTcp, portaUdp, idShard, "ATIVO"));
   }
 
+  /**
+   * Insere ou atualiza os metadados de um servidor conhecido na lista sincronizada de failover.
+   *
+   * @param novo Descritor do servidor descoberto ou atualizado.
+   */
   public void adicionarOuAtualizarServidor(EnderecoServidor novo) {
     if (novo == null || novo.host == null || novo.host.trim().isEmpty()) return;
     synchronized (servidoresConhecidos) {
@@ -466,7 +536,9 @@ public class GerenciadorConexao {
   /**
    * Limpa o socket antigo, atualiza a UI de forma puramente assincrona ("Reconectando..."),
    * executa Discovery UDP automatico em thread dedicada e reconstroi integralmente o estado
-   * volátil (REGISTER + JOINs + BLOCKs) no cluster.
+   * volatil (REGISTER + JOINs + BLOCKs) no cluster.
+   *
+   * @return {@code true} caso o procedimento assincrono de failover tenha sido disparado.
    */
   public boolean executarFailover() {
     if (!executando) {
@@ -572,7 +644,7 @@ public class GerenciadorConexao {
             candidatos.add(endpointAntigo);
           }
 
-          // 3. Validacao Direta da Nova Porta de Entrada (PING brando ou resposta APDU de REGISTER)
+          // 3. Validacao Direta da Nova Porta de Entrada via resposta APDU de REGISTER direto
           for (EnderecoServidor end : candidatos) {
             if (!executando) break;
             try {
@@ -679,6 +751,9 @@ public class GerenciadorConexao {
     return true;
   }
 
+  /**
+   * Interrompe o monitoramento continuo de liveness e libera eventuais threads aguardando failover.
+   */
   public void parar() {
     this.executando = false;
     if (this.tcp != null) {

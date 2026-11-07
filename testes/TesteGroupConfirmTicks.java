@@ -1,5 +1,5 @@
 /**
- * Teste Automatizado da APDU CONFIRM em Grupo (Validação de Leitura por TODOS os membros)
+ * Teste Automatizado da APDU CONFIRM em Grupo (Validacao de Leitura por TODOS os membros)
  */
 
 import java.net.*;

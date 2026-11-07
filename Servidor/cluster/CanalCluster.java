@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: CanalCluster
 * Funcao.............: Gerenciador de conexoes TCP ponto-a-ponto entre servidores com reconexao automatica.
 *************************************************************** */
@@ -81,6 +81,13 @@ public class CanalCluster {
     }
   }
 
+  /**
+   * Inicializa a malha TCP interna do cluster preparando os canais de saida para os pares do mesmo shard.
+   *
+   * @param config   Configuracao de topologia deste no.
+   * @param visao    Estrutura de saude e liveness dos pares do shard.
+   * @param receptor Callback receptor das mensagens internas de consenso e replicacao.
+   */
   public CanalCluster(ConfigCluster config, VisaoCluster visao, ReceptorMensagemCluster receptor) {
     this.config = config;
     this.visao = visao;
@@ -151,6 +158,13 @@ public class CanalCluster {
     threadConector.start();
   }
 
+  /**
+   * Registra dinamicamente um novo canal de saida TCP para um par descoberto em tempo de execucao.
+   *
+   * @param id    Identificador global do par.
+   * @param host  Endereco IP ou hostname do par.
+   * @param porta Porta TCP interna de cluster do par.
+   */
   public void adicionarParSeAusente(int id, String host, int porta) {
     if (id <= 0 || id == config.getMeuId()) return;
     int portaGarantida = PortasShard.clusterDoNo(id);
@@ -270,6 +284,12 @@ public class CanalCluster {
     }
   }
 
+  /**
+   * Verifica se o socket TCP de saida para o par informado encontra-se ativo e conectado.
+   *
+   * @param id Identificador global do par.
+   * @return {@code true} caso a conexao de saida esteja ativa.
+   */
   public boolean isParConectado(int id) {
     SaidaPar p = conexoesSaida.get(id);
     return p != null && p.isConectado();
@@ -377,6 +397,9 @@ public class CanalCluster {
     }
   }
 
+  /**
+   * Encerra o ServerSocket de escuta e todas as conexoes TCP de saida ativas no canal de cluster.
+   */
   public void fechar() {
     this.executando = false;
     fecharSocketServidor();

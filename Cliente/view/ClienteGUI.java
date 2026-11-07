@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/06/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: ClienteGUI
 * Funcao.............: Interface Grafica (JavaFX) principal do Cliente E.D.E.N, gerenciando paineis, temas e chats.
 *************************************************************** */
@@ -67,6 +67,9 @@ public class ClienteGUI extends Application implements MessageListener {
 
   private static volatile ClienteGUI instanciaAtiva = null;
 
+  /**
+   * Aciona a desconexao limpa da sessao ativa durante o encerramento abrupto da JVM.
+   */
   public static void executarShutdownHook() {
     if (instanciaAtiva != null) {
       try {
@@ -128,6 +131,11 @@ public class ClienteGUI extends Application implements MessageListener {
     }
   }
 
+  /**
+   * Inicializa o palco principal JavaFX, estilos visuais e tela de abertura do cliente.
+   *
+   * @param primaryStage Palco primario fornecido pelo runtime JavaFX.
+   */
   @Override
   public void start(Stage primaryStage) {
     instanciaAtiva = this;
@@ -2197,6 +2205,17 @@ public class ClienteGUI extends Application implements MessageListener {
   // =========================================================================
   // CALLBACKS DO LISTENER (Thread UDP -> GUI)
   // =========================================================================
+
+  /**
+   * Processa a chegada assincrona de uma mensagem publica ou privada na interface grafica.
+   *
+   * @param idMensagem          Identificador unico da mensagem recebida.
+   * @param destino             Grupo ou canal privado de destino.
+   * @param remetente           Metadados do usuario autor da mensagem.
+   * @param mensagem            Conteudo textual recebido.
+   * @param isPrivate           Indica se a mensagem e privada ({@code true}) ou de grupo.
+   * @param isVisualizacaoUnica Indica se a mensagem possui restricao de visualizacao unica.
+   */
   @Override
   public void onMessageReceived(String idMensagem, String destino, InfoUser remetente, String mensagem, boolean isPrivate, boolean isVisualizacaoUnica) {
     Platform.runLater(() -> {
@@ -2259,11 +2278,17 @@ public class ClienteGUI extends Application implements MessageListener {
     });
   }
 
+  /**
+   * Trata a notificacao de desligamento gracioso do servidor mantendo a sessao pronta para failover.
+   */
   @Override
   public void onShutdown() {
     System.out.println("[GUI] [INFO] Aviso de encerramento de servidor recebido. Mantendo aplicacao aberta para failover...");
   }
 
+  /**
+   * Solicita a atualizacao assincrona da lista global de usuarios online exibida na barra lateral.
+   */
   @Override
   public void onUpdateUsers() {
     Platform.runLater(() -> {
@@ -2271,6 +2296,13 @@ public class ClienteGUI extends Application implements MessageListener {
     });
   }
 
+  /**
+   * Atualiza o indicador visual de ticks (enviado, entregue ou lido) de uma mensagem na conversa.
+   *
+   * @param idMensagem    Identificador unico da mensagem confirmada.
+   * @param status        Nivel de confirmacao alcancado (1, 2, 3 ou -1 para falha).
+   * @param nomeConfirmou Codinome do destinatario que originou a confirmacao.
+   */
   @Override
   public void onTickReceived(String idMensagem, int status, String nomeConfirmou) {
     Platform.runLater(() -> {
@@ -2305,6 +2337,9 @@ public class ClienteGUI extends Application implements MessageListener {
     });
   }
 
+  /**
+   * Exibe o estado visual de reconexao automatica no topo da janela ao detectar queda do socket TCP.
+   */
   @Override
   public void onConexaoPerdida() {
     Platform.runLater(() -> {
@@ -2326,11 +2361,26 @@ public class ClienteGUI extends Application implements MessageListener {
     });
   }
 
+  /**
+   * Restaura o indicador visual de conexao apos failover inferindo o Shard pela porta TCP.
+   *
+   * @param ip       Novo endereco IP conectado.
+   * @param portaTcp Nova porta TCP de atendimento.
+   * @param portaUdp Nova porta UDP de atendimento.
+   */
   @Override
   public void onReconectado(String ip, int portaTcp, int portaUdp) {
     onReconectado(ip, portaTcp, portaUdp, identificarShardPorPortaTcp(portaTcp));
   }
 
+  /**
+   * Restaura o indicador visual de conexao apos failover com identificacao explicita de Shard.
+   *
+   * @param ip       Novo endereco IP conectado.
+   * @param portaTcp Nova porta TCP de atendimento.
+   * @param portaUdp Nova porta UDP de atendimento.
+   * @param idShard  Indice da particao assumida como porta de entrada.
+   */
   @Override
   public void onReconectado(String ip, int portaTcp, int portaUdp, int idShard) {
     Platform.runLater(() -> {
@@ -2349,6 +2399,13 @@ public class ClienteGUI extends Application implements MessageListener {
     });
   }
 
+  /**
+   * Processa a notificacao proativa {@code SERVER_CHANGED} emitida por uma replica Standby promovida a lider.
+   *
+   * @param novoIp       Endereco IP do novo lider promovido.
+   * @param novaPortaTcp Nova porta TCP do lider promovido.
+   * @param novaPortaUdp Nova porta UDP do lider promovido.
+   */
   @Override
   public void onServerChanged(String novoIp, int novaPortaTcp, int novaPortaUdp) {
     int shardAtual = (this.shardEntradaConectado >= 0)
@@ -2397,6 +2454,9 @@ public class ClienteGUI extends Application implements MessageListener {
     }, "Thread-MigrarReplicaEntrada").start();
   }
 
+  /**
+   * Executa a saida explicita de todos os grupos ativos, envia {@code LOGOUT} e encerra sockets locais.
+   */
   public synchronized void desconectarLimpo() {
     if (eu != null && eu.getNome() != null && !eu.getNome().trim().isEmpty()) {
       this.ultimoCodinome = eu.getNome().trim();
@@ -2459,6 +2519,9 @@ public class ClienteGUI extends Application implements MessageListener {
     }
   }
 
+  /**
+   * Hook de ciclo de vida JavaFX invocado no fechamento da janela principal.
+   */
   @Override
   public void stop() {
     desconectarLimpo();

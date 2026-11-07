@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 05/11/2026
-* Ultima alteracao...: 05/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: Particionador
 * Funcao.............: Funcao de particao da ED em 3 shards pela letra inicial: [A..I], [J..R], [S..Z].
 *************************************************************** */
@@ -20,8 +20,8 @@ import java.text.Normalizer;
  *   <li>Shard 2: nomes iniciados por S..Z</li>
  *   <li>Qualquer outro caractere inicial (numeros, simbolos, vazio, nulo) vai FIXAMENTE para o Shard 0.</li>
  * </ul>
- * A chave e normalizada: trim, remocao de '@' inicial, minusculas e remocao de acentos
- * (ex.: "Álvaro" e "alvaro" caem no mesmo shard; "Çelso" -> 'c').
+ * A chave e normalizada: trim, remocao de '@' inicial, minusculas e decomposicao NFD sem acentos
+ * (caracteres acentuados ou cedilha sao mapeados para a letra base ASCII antes do calculo).
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
  * @version 1.0
@@ -96,6 +96,12 @@ public final class Particionador {
     return shardDe(chave) == shard;
   }
 
+  /**
+   * Valida se o identificador de shard pertence ao intervalo valido {@code [0, NUM_SHARDS - 1]}.
+   *
+   * @param shard Indice do shard a validar.
+   * @throws IllegalArgumentException Caso o indice informado seja invalido.
+   */
   public static void validarShard(int shard) {
     if (shard < 0 || shard >= NUM_SHARDS) {
       throw new IllegalArgumentException("ID_SHARD invalido: " + shard + " (esperado 0.." + (NUM_SHARDS - 1) + ")");

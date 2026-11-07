@@ -1,5 +1,5 @@
 /**
- * Teste de Reprodução: Conexão do Cliente do Luan com o Servidor EDEN
+ * Teste de Reproducao: Conexao do Cliente do Luan com o Servidor EDEN
  */
 public class TesteLuanLogin {
   public static void main(String[] args) {

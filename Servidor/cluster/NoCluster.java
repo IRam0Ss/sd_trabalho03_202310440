@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: NoCluster
 * Funcao.............: Orquestrador da maquina de estados do no no cluster, eleicao sem preempcao (D1) e ciclo de vida.
 *************************************************************** */
@@ -60,6 +60,12 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         }
       }));
 
+  /**
+   * Inicializa os componentes de consenso intra-shard, replicacao, atendimento de rede e roteamento inter-shard.
+   *
+   * @param config      Configuracao de topologia deste no.
+   * @param gerenciador Estrutura de dados particionada e replicada sob responsabilidade deste no.
+   */
   public NoCluster(ConfigCluster config, GerenciadorGrupos gerenciador) {
     this.config = config;
     this.gerenciador = gerenciador;
@@ -583,6 +589,11 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
   // PROCESSAMENTO DE MENSAGENS RECEBIDAS DO CLUSTER
   // =========================================================================
 
+  /**
+   * Processa uma mensagem interna recebida pelo {@link CanalCluster} dentro do consenso intra-shard.
+   *
+   * @param msg Envelope serializado recebido de um par do mesmo shard.
+   */
   @Override
   public void onMensagemRecebida(MensagemCluster msg) {
     if (msg == null) return;

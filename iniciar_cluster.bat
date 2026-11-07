@@ -34,21 +34,21 @@ echo ==========================================================================
 echo   E.D.E.N. (T#03) - INICIANDO CLUSTER PARTICIONADO (6 PROCESSOS)
 echo ==========================================================================
 
-echo [1/2] Abrindo 3 primeiros nós (Lideres Pioneiros dos Shards)...
-start "EDEN No 1 [S1 J..R] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
+echo [1/2] Abrindo 3 primeiros nos (Lideres Pioneiros dos Shards)...
+start "EDEN No 1 [S0 A..I] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
 timeout /t 1 /nobreak >nul
-start "EDEN No 2 [S2 S..Z] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
+start "EDEN No 2 [S1 J..R] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
 timeout /t 1 /nobreak >nul
-start "EDEN No 3 [S0 A..I] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
+start "EDEN No 3 [S2 S..Z] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
 
 timeout /t 1 /nobreak >nul
 
-echo [2/2] Abrindo 3 nós seguintes (Replicas Standby dos Shards)...
-start "EDEN No 4 [S1 J..R] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
+echo [2/2] Abrindo 3 nos seguintes (Replicas Standby dos Shards)...
+start "EDEN No 4 [S0 A..I] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
 timeout /t 1 /nobreak >nul
-start "EDEN No 5 [S2 S..Z] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
+start "EDEN No 5 [S1 J..R] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
 timeout /t 1 /nobreak >nul
-start "EDEN No 6 [S0 A..I] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
+start "EDEN No 6 [S2 S..Z] (Zero-Config)" cmd /k "java -cp Servidor/bin Principal %MODO_FLAG%"
 
 echo --------------------------------------------------------------------------
 echo  6 janelas iniciadas com sucesso! Digite 'status' em qualquer terminal.

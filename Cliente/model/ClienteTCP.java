@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/06/2026
-* Ultima alteracao...: 06/11/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: ClienteTCP
 * Funcao.............: Gerencia o canal TCP de controle com deteccao imediata de queda e failover via Discovery UDP.
 *************************************************************** */
@@ -59,6 +59,14 @@ public class ClienteTCP {
   private static final int CONNECT_TIMEOUT_MS = 1000;
   private static final int READ_TIMEOUT_MS = 3500;
 
+  /**
+   * Inicializa e estabelece a conexao TCP inicial com o servidor alvo.
+   *
+   * @param ipServidor    Endereco IP ou hostname do servidor.
+   * @param portaServidor Porta TCP de atendimento do servidor.
+   * @throws UnknownHostException Caso o host informado nao possa ser resolvido.
+   * @throws IOException          Caso ocorra falha ao abrir o socket ou streams de objetos.
+   */
   public ClienteTCP(String ipServidor, int portaServidor) throws UnknownHostException, IOException {
     this.ipServidor = ipServidor;
     this.portaServidor = portaServidor;
@@ -87,7 +95,7 @@ public class ClienteTCP {
 
   /**
    * Verifica ativamente se o socket TCP ainda esta aberto e conectado com o servidor.
-   * Detecta se o servidor fechou o socket (FIN recebido -> in.read() retorna -1) ou se o socket
+   * Detecta se o servidor fechou o socket ({@code FIN -> in.read() == -1}) ou se o socket
    * entrou em CLOSE_WAIT, lancando EOFException/SocketException.
    * Retorna true apenas se a conexao estiver genuinamente ativa.
    */
@@ -194,8 +202,11 @@ public class ClienteTCP {
   }
 
   /**
-   * Executa um PING direto sem acionar recursao de failover, lancando IOException imediatamente
-   * se o socket TCP caiu (usado pelo monitor de liveness e pela thread de failover).
+   * Executa uma sonda direta de conectividade sem acionar recursao de failover, lancando IOException
+   * imediatamente se o socket TCP caiu (utilitario auxiliar de retrocompatibilidade).
+   *
+   * @return APDU de resposta do servidor.
+   * @throws IOException Caso o canal TCP tenha sido encerrado ou corrompido.
    */
   public APDU pingDireto() throws IOException {
     APDU apdu = new APDU(Protocolo.PING, null, null, null, 0);
@@ -261,6 +272,9 @@ public class ClienteTCP {
     return new ArrayList<>(usuariosBloqueados);
   }
 
+  /**
+   * Limpa os conjuntos locais de grupos e bloqueios ativos mantidos na sessao do cliente.
+   */
   public void limparEstadoSessao() {
     gruposAtivos.clear();
     usuariosBloqueados.clear();
@@ -335,11 +349,23 @@ public class ClienteTCP {
     }
   }
 
+  /**
+   * Envia uma APDU de verificacao de conectividade com suporte a reconexao transparente.
+   *
+   * @return APDU de resposta do servidor.
+   */
   public APDU ping() {
     APDU apdu = new APDU(Protocolo.PING, null, null, null, 0);
     return executarComando(apdu);
   }
 
+  /**
+   * Solicita ingresso do usuario em um grupo de comunicacao e registra a sala para reconstrucao em failover.
+   *
+   * @param nomeGrupo Nome do grupo alvo.
+   * @param usuario   Metadados locais do usuario (nome e porta UDP).
+   * @return APDU de resposta confirmando ou rejeitando a entrada no grupo.
+   */
   public APDU join(String nomeGrupo, InfoUser usuario) {
     APDU apdu = new APDU("JOIN", nomeGrupo, usuario.getNome(), null, usuario.getPorta());
     System.out.println("[CLIENTE:TCP] [INFO] JOIN enviado ao servidor: " + usuario.toString());
@@ -352,6 +378,13 @@ public class ClienteTCP {
     return resp;
   }
 
+  /**
+   * Solicita a saida do usuario de um grupo especifico (ou de todos os grupos se {@code GLOBAL}).
+   *
+   * @param nomeGrupo Nome do grupo a deixar.
+   * @param usuario   Metadados locais do usuario.
+   * @return APDU de resposta do servidor.
+   */
   public APDU leave(String nomeGrupo, InfoUser usuario) {
     if (nomeGrupo != null) {
       if ("GLOBAL".equalsIgnoreCase(nomeGrupo.trim())) {
@@ -365,27 +398,56 @@ public class ClienteTCP {
     return executarComando(apdu);
   }
 
+  /**
+   * Consulta a relacao consolidada (Scatter-Gather) de grupos ativos no cluster.
+   *
+   * @return APDU contendo os nomes dos grupos separados na carga de texto.
+   */
   public APDU list() {
     APDU apdu = new APDU("LIST", null, null, null, 0);
     System.out.println("[CLIENTE:TCP] [INFO] LIST enviado ao servidor");
     return executarComando(apdu);
   }
 
+  /**
+   * Registra a sessao e o endpoint UDP do usuario perante o cluster particionado.
+   *
+   * @param usuario Metadados locais do usuario (codinome e porta UDP efemera).
+   * @return APDU de confirmacao ou erro de autenticacao/unicidade.
+   */
   public APDU register(InfoUser usuario) {
     APDU apdu = new APDU("REGISTER", "GLOBAL", usuario.getNome(), null, usuario.getPorta());
     return executarComando(apdu);
   }
 
+  /**
+   * Consulta a relacao global consolidada (Scatter-Gather) de usuarios online em todos os Shards.
+   *
+   * @return APDU contendo a lista de usuarios conectados.
+   */
   public APDU listUsers() {
     APDU apdu = new APDU("USERS", null, null, null, 0);
     return executarComando(apdu);
   }
 
+  /**
+   * Consulta os membros participantes de um grupo especifico no Shard responsavel pela sala.
+   *
+   * @param nomeGrupo Nome do grupo a consultar.
+   * @return APDU contendo os integrantes da sala.
+   */
   public APDU listMembers(String nomeGrupo) {
     APDU apdu = new APDU("MEMBERS", nomeGrupo, null, null, 0);
     return executarComando(apdu);
   }
 
+  /**
+   * Registra o bloqueio global de mensagens oriundas do usuario alvo.
+   *
+   * @param usuarioDestino Codinome do usuario a bloquear.
+   * @param usuario        Metadados do usuario solicitante.
+   * @return APDU de resposta da operacao.
+   */
   public APDU block(String usuarioDestino, InfoUser usuario) {
     APDU apdu = new APDU("BLOCK", null, usuario.getNome(), null, usuario.getPorta(), usuarioDestino);
     APDU resp = executarComando(apdu);
@@ -396,6 +458,13 @@ public class ClienteTCP {
     return resp;
   }
 
+  /**
+   * Remove o bloqueio global previamente aplicado sobre um usuario alvo.
+   *
+   * @param usuarioDestino Codinome do usuario a desbloquear.
+   * @param usuario        Metadados do usuario solicitante.
+   * @return APDU de resposta da operacao.
+   */
   public APDU unblock(String usuarioDestino, InfoUser usuario) {
     if (usuarioDestino != null) {
       usuariosBloqueados.removeIf(u -> u.equalsIgnoreCase(usuarioDestino.trim()));
@@ -404,6 +473,9 @@ public class ClienteTCP {
     return executarComando(apdu);
   }
 
+  /**
+   * Encerra de forma segura o socket TCP e os streams de serializacao associados.
+   */
   public void fecharConexao() {
     synchronized (ioLock) {
       fecharConexaoInterno();

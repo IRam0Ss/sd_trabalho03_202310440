@@ -1,4 +1,4 @@
-package scratch;
+
 
 import java.io.File;
 import java.util.ArrayList;
@@ -176,7 +176,7 @@ public class TesteGhostClients {
 
     List<Process> procs = new ArrayList<>();
     try {
-      // Inicia Nó 1 e Nó 2 em modo local
+      // Inicia No 1 e No 2 em modo local
       ProcessBuilder pb1 = new ProcessBuilder("java", "-cp", "Servidor/bin", "Principal", "--local");
       pb1.directory(new File("."));
       pb1.redirectErrorStream(true);
@@ -197,7 +197,7 @@ public class TesteGhostClients {
 
       Thread.sleep(2500);
 
-      // Descobre quem e o lider: Nó 1 escuta TCP 6789, Nó 2 escuta TCP 6790
+      // Descobre quem e o lider: No 1 escuta TCP 6789, No 2 escuta TCP 6790
       int portaLider = -1;
       int portaStandby = -1;
 
@@ -214,7 +214,7 @@ public class TesteGhostClients {
       }
       System.out.println("  Líder do cluster identificado na porta TCP " + portaLider);
 
-      // Conecta BobCluster e AliceCluster ao líder
+      // Conecta BobCluster e AliceCluster ao lider
       ClienteTCP tcpBob = new ClienteTCP("127.0.0.1", portaLider);
       InfoUser uBob = new InfoUser("BobCluster", "127.0.0.1", 20001);
       tcpBob.register(uBob);
@@ -233,7 +233,7 @@ public class TesteGhostClients {
         throw new AssertionError("BobCluster e AliceCluster devem estar na sala!");
       }
 
-      // BobCluster sofre brute disconnect no líder
+      // BobCluster sofre brute disconnect no lider
       System.out.println("  [SIMULACAO] BobCluster sofre brute disconnect no líder...");
       tcpBob.fecharConexao();
 
@@ -252,7 +252,7 @@ public class TesteGhostClients {
         throw new AssertionError("FALHA: BobCluster ainda consta como online no cluster!");
       }
 
-      // 4. Agora simula queda do líder (Failover) e garante que Alice NAO e deletada por engano
+      // 4. Agora simula queda do lider (Failover) e garante que Alice NAO e deletada por engano
       System.out.println("\n  [SIMULACAO] Derrubando o processo do líder (Failover para Standby)...");
       if (portaLider == 6789) {
         p1.destroyForcibly();

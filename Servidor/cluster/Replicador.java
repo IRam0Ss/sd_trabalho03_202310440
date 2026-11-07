@@ -1,8 +1,8 @@
 /*****************************************************************
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
-* Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Inicio.............: 02/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: Replicador
 * Funcao.............: Gerenciador de replicacao sincrona de estado com confirmacao de todos os nos (D2) e snapshots.
 *************************************************************** */
@@ -59,6 +59,14 @@ public class Replicador {
 
   private final Map<Long, LatchInfo> acksPendentes = new ConcurrentHashMap<>();
 
+  /**
+   * Inicializa o motor de replicacao sincrona primario-backup deste no.
+   *
+   * @param meuId       Identificador global deste no.
+   * @param gerenciador Estrutura de dados local replicada.
+   * @param canal       Canal TCP interno do shard para envio de operacoes e snapshots.
+   * @param visao       Tabela de saude dos pares elegiveis no shard.
+   */
   public Replicador(int meuId, GerenciadorGrupos gerenciador, CanalCluster canal, VisaoCluster visao) {
     this.meuId = meuId;
     this.gerenciador = gerenciador;

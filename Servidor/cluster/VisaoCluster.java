@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/10/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: VisaoCluster
 * Funcao.............: Tabela em memoria do estado de conectividade, versao e papel de todos os pares.
 *************************************************************** */
@@ -27,6 +27,7 @@ public class VisaoCluster implements Serializable {
 
   private static final long serialVersionUID = 1L;
 
+  /** Estado dinamico de conectividade, sincronizacao e liveness de uma replica do shard. */
   public static class ParEstado implements Serializable {
     private static final long serialVersionUID = 1L;
 
@@ -42,6 +43,11 @@ public class VisaoCluster implements Serializable {
     public volatile long ultimoHeartbeat;
     public volatile boolean conectado;
 
+    /**
+     * Inicializa o descritor de estado de um par recem-descoberto como {@code DOWN} ate o primeiro handshake.
+     *
+     * @param info Metadados estaticos de rede do par.
+     */
     public ParEstado(ConfigCluster.NoInfo info) {
       this.id = info.id;
       this.host = info.host;
@@ -56,10 +62,12 @@ public class VisaoCluster implements Serializable {
       this.conectado = false;
     }
 
+    /** Verifica se o par possui canal TCP conectado e estado diferente de {@code DOWN}. */
     public boolean isVivo() {
       return conectado && !"DOWN".equalsIgnoreCase(estado);
     }
 
+    /** Verifica se o par esta vivo e sincronizado para participar de votacoes e replicacao. */
     public boolean isElegivel() {
       return isVivo() && ("STANDBY".equalsIgnoreCase(estado) || "ATIVO".equalsIgnoreCase(estado) || "CANDIDATO".equalsIgnoreCase(estado));
     }
@@ -69,6 +77,11 @@ public class VisaoCluster implements Serializable {
   private final int idShard;
   private final Map<Integer, ParEstado> pares = new HashMap<>();
 
+  /**
+   * Inicializa a visao de saude da particao local com os pares previamente conhecidos.
+   *
+   * @param config Configuracao de topologia deste no.
+   */
   public VisaoCluster(ConfigCluster config) {
     this.meuId = config.getMeuId();
     this.idShard = config.getIdShard();
@@ -79,6 +92,11 @@ public class VisaoCluster implements Serializable {
     }
   }
 
+  /**
+   * Registra um novo par na tabela de saude caso pertenca estritamente ao mesmo shard.
+   *
+   * @param info Metadados de rede do par descoberto.
+   */
   public synchronized void adicionarParSeAusente(ConfigCluster.NoInfo info) {
     if (info == null || info.id == meuId) {
       return;
@@ -93,6 +111,12 @@ public class VisaoCluster implements Serializable {
     }
   }
 
+  /**
+   * Atualiza o indicador de conectividade TCP de um par preservando seu estado logico ate o timeout de heartbeat.
+   *
+   * @param id        Identificador global do par.
+   * @param conectado {@code true} se o canal TCP estiver ativo.
+   */
   public synchronized void marcarConectado(int id, boolean conectado) {
     ParEstado p = pares.get(id);
     if (p != null) {
@@ -109,6 +133,11 @@ public class VisaoCluster implements Serializable {
     }
   }
 
+  /**
+   * Marca imediatamente um par como {@code DOWN} e desconectado (usado em saidas graciosas ou timeouts).
+   *
+   * @param id Identificador global do par.
+   */
   public synchronized void marcarDown(int id) {
     ParEstado p = pares.get(id);
     if (p != null) {
@@ -117,6 +146,17 @@ public class VisaoCluster implements Serializable {
     }
   }
 
+  /**
+   * Renova os metadados de liveness, epoca, versao e hash CRC32 reportados por um par do mesmo shard.
+   *
+   * @param id       Identificador global do par remetente.
+   * @param estado   Papel operacional reportado pelo par.
+   * @param epoca    Epoca atual do par.
+   * @param versao   Versao da estrutura de dados no par.
+   * @param hash     Checksum CRC32 do estado no par.
+   * @param portaTcp Porta TCP de atendimento reportada.
+   * @param portaUdp Porta UDP de atendimento reportada.
+   */
   public synchronized void atualizarHeartbeat(int id, String estado, long epoca, long versao, long hash, int portaTcp, int portaUdp) {
     ParEstado p = pares.get(id);
     if (p != null) {

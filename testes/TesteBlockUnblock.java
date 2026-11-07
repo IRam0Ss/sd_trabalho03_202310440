@@ -1,5 +1,5 @@
 /**
- * Teste Automatizado das APDUs BLOCK e UNBLOCK (Bloqueio Mútuo & Tag em Grupo)
+ * Teste Automatizado das APDUs BLOCK e UNBLOCK (Bloqueio Mutuo & Tag em Grupo)
  */
 
 import java.net.*;

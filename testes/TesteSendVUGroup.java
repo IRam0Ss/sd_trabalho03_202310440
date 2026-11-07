@@ -1,5 +1,5 @@
 /**
- * Teste Automatizado da APDU SENDVU (Visualização Única por Pop-up e Confirmação em Grupo por todos os membros)
+ * Teste Automatizado da APDU SENDVU (Visualizacao Unica por Pop-up e Confirmacao em Grupo por todos os membros)
  */
 
 import java.net.*;

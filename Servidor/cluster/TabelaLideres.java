@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 05/11/2026
-* Ultima alteracao...: 05/11/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: TabelaLideres
 * Funcao.............: Tabela (shard -> lider ativo conhecido) com expiracao, alimentada por anuncios entre shards.
 *************************************************************** */
@@ -31,6 +31,9 @@ public class TabelaLideres {
   private final Entrada[] entradas = new Entrada[Particionador.NUM_SHARDS];
   private final String[][] hostsReplicas = new String[Particionador.NUM_SHARDS][PortasShard.MAX_REPLICAS];
 
+  /**
+   * Inicializa a tabela de lideres ativos conhecidos para todas as particoes do cluster.
+   */
   public TabelaLideres() {
     for (int i = 0; i < entradas.length; i++) {
       entradas[i] = new Entrada();
@@ -105,6 +108,15 @@ public class TabelaLideres {
     return registrarAtivo(shard, idLider, epoca, null);
   }
 
+  /**
+   * Registra o lider ativo anunciado de uma particao incluindo o endereco IP/host anunciado.
+   *
+   * @param shard   Indice da particao (0..2).
+   * @param idLider Identificador global do lider ativo.
+   * @param epoca   Epoca de lideranca reportada.
+   * @param host    Endereco IP/host do lider (opcional).
+   * @return {@code true} caso o lider conhecido da particao tenha mudado.
+   */
   public synchronized boolean registrarAtivo(int shard, int idLider, long epoca, String host) {
     if (hostValido(host)) {
       registrarHostReplica(shard, idLider, host);
@@ -131,6 +143,14 @@ public class TabelaLideres {
     return sugerir(shard, idLider, null);
   }
 
+  /**
+   * Sugere o lider conhecido por uma replica Standby caso nao exista entrada fresca registrada.
+   *
+   * @param shard        Indice da particao (0..2).
+   * @param idLider      Identificador global do lider sugerido.
+   * @param hostSugerido Endereco IP/host associado ao lider (opcional).
+   * @return {@code true} caso a entrada da particao tenha sido atualizada.
+   */
   public synchronized boolean sugerir(int shard, int idLider, String hostSugerido) {
     if (idLider <= 0) {
       return false;
@@ -167,6 +187,15 @@ public class TabelaLideres {
     return definirProprio(shard, idLider, epoca, null);
   }
 
+  /**
+   * Atualiza diretamente a entrada correspondente ao proprio shard deste processo com host explicito.
+   *
+   * @param shard   Indice da particao local (0..2).
+   * @param idLider Identificador global do lider local atual.
+   * @param epoca   Epoca de lideranca local.
+   * @param host    Endereco IP/host do lider local.
+   * @return {@code true} caso o lider registrado tenha mudado.
+   */
   public synchronized boolean definirProprio(int shard, int idLider, long epoca, String host) {
     if (hostValido(host)) {
       registrarHostReplica(shard, idLider, host);

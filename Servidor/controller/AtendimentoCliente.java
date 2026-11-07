@@ -2,7 +2,7 @@
 * Autor..............: Iury Ramos Sodre
 * Matricula..........: 202310440
 * Inicio.............: 15/06/2026
-* Ultima alteracao...: 17/10/2026
+* Ultima alteracao...: 07/11/2026
 * Nome...............: AtendimentoCliente
 * Funcao.............: Thread dedicada para atendimento e processamento concorrente de requisicoes TCP de cada cliente.
 *************************************************************** */
@@ -34,7 +34,7 @@ import model.NotificadorClientes;
  * Classe responsavel por atender clientes individuais via conexao TCP concorrente.
  * Na arquitetura particionada (T#03), atua como Proxy Transparente no Servidor:
  * o cliente e a APDU permanecem intactos, enquanto cada comando e roteado para o lider
- * do Shard responsavel (A..I -> S0, J..R -> S1, S..Z -> S2), com Scatter-Gather resiliente
+ * do Shard responsavel ({@code A..I -> S0, J..R -> S1, S..Z -> S2}), com Scatter-Gather resiliente
  * em LIST/USERS, replicacao global assincrona em BLOCK/UNBLOCK e broadcast UDP USUARIO_CAIU.
  * 
  * @author Iury Ramos Sodre (Matricula: 202310440)
@@ -172,7 +172,7 @@ public class AtendimentoCliente implements Runnable {
 
   /**
    * Fecha imediatamente o socket TCP deste cliente no no de entrada quando um shard de destino
-   * reiniciou sem o estado volátil do usuario/grupo (Amnesia de Shard).
+   * reiniciou sem o estado volatil do usuario/grupo (Amnesia de Shard).
    * Nao dispara faxina de cliente fantasma nos demais shards saudaveis, permitindo que o cliente
    * entre em Failover automatico e reenvie REGISTER e JOIN para reconstruir a memoria perdida.
    */
@@ -192,7 +192,7 @@ public class AtendimentoCliente implements Runnable {
   }
 
   /**
-   * Valida se algum shard online perdeu o estado volátil deste cliente; caso afirmativo,
+   * Valida se algum shard online perdeu o estado volatil deste cliente; caso afirmativo,
    * encerra o socket TCP imediatamente e retorna true.
    */
   private boolean verificarEDerrubarSeAmnesia() {

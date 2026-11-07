@@ -650,13 +650,41 @@ public class GerenciadorGrupos implements Serializable {
   }
 
   /**
-   * Retorna a uniao de todos os usuarios ativos cadastrados nesta particao com os endpoints de
-   * membros cross-shard salvos nesta particao (usado para broadcast integral de failover SERVER_CHANGED).
+   * Retorna a uniao deduplicada por endpoint fisico (IP:PortaUDP) de:
+   *  1) todos os usuarios ativos cadastrados nesta particao (usuarios),
+   *  2) todos os endpoints de membros cross-shard em grupos desta particao (endpointsMembros),
+   *  3) todos os autores cross-shard rastreados em mensagens pendentes/confirmadas (mensagens).
+   * Deduplica por IP:Porta (e nao por InfoUser.equals, que compara apenas nome) para garantir
+   * que nenhum cliente em grupo cross-shard ou aguardando CONFIRM perca o SERVER_CHANGED no failover!
    */
-  public synchronized Set<InfoUser> getTodosDestinatariosNotificacao() {
-    Set<InfoUser> uniao = new HashSet<>(usuarios.values());
-    uniao.addAll(endpointsMembros.values());
-    return uniao;
+  public synchronized List<InfoUser> getTodosDestinatariosNotificacao() {
+    Map<String, InfoUser> porEndpoint = new LinkedHashMap<>();
+
+    for (InfoUser u : usuarios.values()) {
+      registrarEndpointNotificacao(porEndpoint, u);
+    }
+    for (InfoUser ep : endpointsMembros.values()) {
+      registrarEndpointNotificacao(porEndpoint, ep);
+    }
+    for (RegistroMensagem reg : mensagens.values()) {
+      if (reg != null && reg.getIpAutor() != null && !reg.getIpAutor().trim().isEmpty() && reg.getPortaAutor() > 0) {
+        InfoUser autorEp = new InfoUser(
+            reg.getAutor() != null ? reg.getAutor() : "autor",
+            reg.getIpAutor().trim(),
+            reg.getPortaAutor());
+        registrarEndpointNotificacao(porEndpoint, autorEp);
+      }
+    }
+
+    return new ArrayList<>(porEndpoint.values());
+  }
+
+  private static void registrarEndpointNotificacao(Map<String, InfoUser> mapa, InfoUser info) {
+    if (info == null || info.getIp() == null || info.getIp().trim().isEmpty() || info.getPorta() <= 0) {
+      return;
+    }
+    String chave = info.getIp().trim() + ":" + info.getPorta();
+    mapa.putIfAbsent(chave, new InfoUser(info.getNome(), info.getIp().trim(), info.getPorta()));
   }
 
   public synchronized InfoUser buscarUsuarioPorNome(String nome) {
@@ -764,18 +792,60 @@ public class GerenciadorGrupos implements Serializable {
   }
 
   /**
-   * Exporta todo o estado profundo da estrutura em vetor de bytes serializado.
+   * Exporta todo o estado profundo da estrutura em vetor de bytes serializado,
+   * incluindo usuarios, endpointsMembros (cross-shard), grupos, bloqueios,
+   * mensagens (estado da APDU de Verificacao / CONFIRM) e cache de idempotencia (requisicoesProcessadas).
    */
   public synchronized byte[] exportarSnapshot() {
     try {
+      Map<String, InfoUser> copiaUsuarios = new HashMap<>();
+      for (Map.Entry<String, InfoUser> e : this.usuarios.entrySet()) {
+        InfoUser u = e.getValue();
+        if (u != null) {
+          copiaUsuarios.put(e.getKey(), new InfoUser(u.getNome(), u.getIp(), u.getPorta()));
+        }
+      }
+
+      Map<String, InfoUser> copiaEndpoints = new HashMap<>();
+      for (Map.Entry<String, InfoUser> e : this.endpointsMembros.entrySet()) {
+        InfoUser ep = e.getValue();
+        if (ep != null) {
+          copiaEndpoints.put(e.getKey(), new InfoUser(ep.getNome(), ep.getIp(), ep.getPorta()));
+        }
+      }
+
+      Map<String, LinkedHashSet<String>> copiaGrupos = new HashMap<>();
+      for (Map.Entry<String, LinkedHashSet<String>> e : this.grupos.entrySet()) {
+        if (e.getValue() != null) {
+          copiaGrupos.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
+        }
+      }
+
+      Map<String, Set<String>> copiaBloqueios = new HashMap<>();
+      for (Map.Entry<String, Set<String>> e : this.bloqueios.entrySet()) {
+        if (e.getValue() != null) {
+          copiaBloqueios.put(e.getKey(), new HashSet<>(e.getValue()));
+        }
+      }
+
+      Map<String, RegistroMensagem> copiaMensagens = new HashMap<>();
+      for (Map.Entry<String, RegistroMensagem> e : this.mensagens.entrySet()) {
+        if (e.getValue() != null) {
+          copiaMensagens.put(e.getKey(), e.getValue().copiar());
+        }
+      }
+
+      LinkedHashMap<String, Resultado> copiaRequisicoes = new LinkedHashMap<>(this.requisicoesProcessadas);
+
       ByteArrayOutputStream baos = new ByteArrayOutputStream();
       ObjectOutputStream oos = new ObjectOutputStream(baos);
       oos.writeLong(this.versao);
-      oos.writeObject(new HashMap<>(this.usuarios));
-      oos.writeObject(new HashMap<>(this.endpointsMembros));
-      oos.writeObject(new HashMap<>(this.grupos));
-      oos.writeObject(new HashMap<>(this.bloqueios));
-      oos.writeObject(new HashMap<>(this.mensagens));
+      oos.writeUnshared(copiaUsuarios);
+      oos.writeUnshared(copiaEndpoints);
+      oos.writeUnshared(copiaGrupos);
+      oos.writeUnshared(copiaBloqueios);
+      oos.writeUnshared(copiaMensagens);
+      oos.writeUnshared(copiaRequisicoes);
       oos.flush();
       return baos.toByteArray();
     } catch (Exception e) {
@@ -785,7 +855,16 @@ public class GerenciadorGrupos implements Serializable {
   }
 
   /**
-   * Substitui atomicamente todo o estado em memoria a partir de um snapshot serializado.
+   * Alias semantico para aplicacao atomica de snapshot completo recebido do lider.
+   */
+  public synchronized void aplicarSnapshot(byte[] dadosSnapshot) throws Exception {
+    importarSnapshot(dadosSnapshot);
+  }
+
+  /**
+   * Substitui atomicamente todo o estado em memoria a partir de um snapshot serializado,
+   * restaurando copias profundas de todos os mapas (usuarios, endpointsMembros, grupos,
+   * bloqueios, mensagens/CONFIRM e requisicoesProcessadas).
    */
   @SuppressWarnings("unchecked")
   public synchronized void importarSnapshot(byte[] dadosSnapshot) throws Exception {
@@ -801,29 +880,79 @@ public class GerenciadorGrupos implements Serializable {
     Map<String, LinkedHashSet<String>> snapGrupos = (Map<String, LinkedHashSet<String>>) ois.readObject();
     Map<String, Set<String>> snapBloqueios = (Map<String, Set<String>>) ois.readObject();
     Map<String, RegistroMensagem> snapMensagens = (Map<String, RegistroMensagem>) ois.readObject();
+    Map<String, Resultado> snapRequisicoes = null;
+    try {
+      Object extra = ois.readObject();
+      if (extra instanceof Map) {
+        snapRequisicoes = (Map<String, Resultado>) extra;
+      }
+    } catch (java.io.EOFException ignored) {
+      // Compatibilidade retroativa com snapshots sem cache de idempotencia
+    }
 
     this.usuarios.clear();
-    this.usuarios.putAll(snapUsuarios);
+    if (snapUsuarios != null) {
+      for (Map.Entry<String, InfoUser> e : snapUsuarios.entrySet()) {
+        InfoUser u = e.getValue();
+        if (u != null) {
+          this.usuarios.put(e.getKey(), new InfoUser(u.getNome(), u.getIp(), u.getPorta()));
+        }
+      }
+    }
 
     this.endpointsMembros.clear();
-    this.endpointsMembros.putAll(snapEndpoints);
+    if (snapEndpoints != null) {
+      for (Map.Entry<String, InfoUser> e : snapEndpoints.entrySet()) {
+        InfoUser ep = e.getValue();
+        if (ep != null) {
+          this.endpointsMembros.put(e.getKey(), new InfoUser(ep.getNome(), ep.getIp(), ep.getPorta()));
+        }
+      }
+    }
 
     this.grupos.clear();
-    this.grupos.putAll(snapGrupos);
+    if (snapGrupos != null) {
+      for (Map.Entry<String, LinkedHashSet<String>> e : snapGrupos.entrySet()) {
+        if (e.getValue() != null) {
+          this.grupos.put(e.getKey(), new LinkedHashSet<>(e.getValue()));
+        }
+      }
+    }
 
     this.bloqueios.clear();
-    this.bloqueios.putAll(snapBloqueios);
+    if (snapBloqueios != null) {
+      for (Map.Entry<String, Set<String>> e : snapBloqueios.entrySet()) {
+        if (e.getValue() != null) {
+          this.bloqueios.put(e.getKey(), new HashSet<>(e.getValue()));
+        }
+      }
+    }
 
     this.mensagens.clear();
-    this.mensagens.putAll(snapMensagens);
+    if (snapMensagens != null) {
+      for (Map.Entry<String, RegistroMensagem> e : snapMensagens.entrySet()) {
+        if (e.getValue() != null) {
+          this.mensagens.put(e.getKey(), e.getValue().copiar());
+        }
+      }
+    }
+
+    this.requisicoesProcessadas.clear();
+    if (snapRequisicoes != null) {
+      this.requisicoesProcessadas.putAll(snapRequisicoes);
+    }
 
     this.versao = versaoSnap;
     System.out.println("[GERENCIADOR] [INFO] Snapshot importado com sucesso. Versao atual: " + this.versao
-        + " | Total usuarios: " + this.usuarios.size() + " | Grupos: " + this.grupos.size());
+        + " | Usuarios: " + this.usuarios.size()
+        + " | EndpointsCrossShard: " + this.endpointsMembros.size()
+        + " | Grupos: " + this.grupos.size()
+        + " | Mensagens(CONFIRM): " + this.mensagens.size());
   }
 
   /**
-   * Calcula um hash CRC32 canonico sobre representacao estritamente ordenada do estado.
+   * Calcula um hash CRC32 canonico sobre representacao estritamente ordenada de TODO o estado
+   * (usuarios, endpointsMembros cross-shard, grupos, bloqueios e mensagens/CONFIRM).
    * Independe da ordem interna das tabelas de hash e permite validacao deterministica
    * de congruencia de estado entre os nos do cluster.
    */
@@ -831,15 +960,27 @@ public class GerenciadorGrupos implements Serializable {
     CRC32 crc = new CRC32();
     crc.update(String.valueOf(this.versao).getBytes());
 
-    // Usuarios ordenados
+    // 1. Usuarios ordenados
     List<String> usersKeys = new ArrayList<>(usuarios.keySet());
     Collections.sort(usersKeys);
     for (String k : usersKeys) {
       InfoUser u = usuarios.get(k);
-      crc.update(String.format("U:%s:%s:%d;", u.getNome(), u.getIp(), u.getPorta()).getBytes());
+      if (u != null) {
+        crc.update(String.format("U:%s:%s:%d;", u.getNome(), u.getIp(), u.getPorta()).getBytes());
+      }
     }
 
-    // Grupos e membros ordenados
+    // 2. Endpoints de membros cross-shard ordenados
+    List<String> epKeys = new ArrayList<>(endpointsMembros.keySet());
+    Collections.sort(epKeys);
+    for (String k : epKeys) {
+      InfoUser ep = endpointsMembros.get(k);
+      if (ep != null) {
+        crc.update(String.format("EP:%s:%s:%d;", ep.getNome(), ep.getIp(), ep.getPorta()).getBytes());
+      }
+    }
+
+    // 3. Grupos e membros ordenados
     List<String> gruposKeys = new ArrayList<>(grupos.keySet());
     Collections.sort(gruposKeys);
     for (String g : gruposKeys) {
@@ -852,7 +993,7 @@ public class GerenciadorGrupos implements Serializable {
       crc.update("];".getBytes());
     }
 
-    // Bloqueios ordenados
+    // 4. Bloqueios ordenados
     List<String> blkKeys = new ArrayList<>(bloqueios.keySet());
     Collections.sort(blkKeys);
     for (String b : blkKeys) {
@@ -863,6 +1004,25 @@ public class GerenciadorGrupos implements Serializable {
         crc.update((target + ",").getBytes());
       }
       crc.update("];".getBytes());
+    }
+
+    // 5. Mensagens e estado de verificacao (CONFIRM ticks) ordenados
+    List<String> msgKeys = new ArrayList<>(mensagens.keySet());
+    Collections.sort(msgKeys);
+    for (String mId : msgKeys) {
+      RegistroMensagem reg = mensagens.get(mId);
+      if (reg != null) {
+        List<String> esp = new ArrayList<>(reg.getDestinatariosEsperados());
+        List<String> ent = new ArrayList<>(reg.getDestinatariosEntregues());
+        List<String> lid = new ArrayList<>(reg.getDestinatariosLidos());
+        Collections.sort(esp);
+        Collections.sort(ent);
+        Collections.sort(lid);
+        crc.update(String.format("M:%s:%s:%s:%d:%b:%b:%b:%s:%s:%s;",
+            reg.getIdMensagem(), reg.getAutor(), reg.getIpAutor(), reg.getPortaAutor(),
+            reg.isPrivado(), reg.isEntregueNotificado(), reg.isLidoNotificado(),
+            esp.toString(), ent.toString(), lid.toString()).getBytes());
+      }
     }
 
     return crc.getValue();

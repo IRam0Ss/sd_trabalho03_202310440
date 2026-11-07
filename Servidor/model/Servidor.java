@@ -14,8 +14,12 @@ import java.net.Inet4Address;
 import java.net.NetworkInterface;
 import java.util.ArrayList;
 import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 
+import cluster.ConfigCluster;
+import cluster.PortasShard;
 import cluster.RoteadorShards;
 import controller.GerenciadorGrupos;
 import utils.Protocolo;
@@ -72,10 +76,52 @@ public class Servidor {
     iniciarServicos(portaTcp, portaUdp, portaDiscovery, incluirLegado, idNo, 0);
   }
 
+  private void abrirTcpExtra(Set<Integer> portasAbertas, int porta, String sufixoThread) {
+    if (porta <= 0 || !portasAbertas.add(porta)) {
+      return;
+    }
+    try {
+      ServidorTCP tcpExtra = new ServidorTCP(porta, gerenciador, roteador, true);
+      servicosTCP.add(tcpExtra);
+      new Thread(tcpExtra, "Thread-ServidorTCP-" + sufixoThread + "-" + porta).start();
+    } catch (Exception ignored) {
+    }
+  }
+
+  private void abrirUdpExtra(Set<Integer> portasAbertas, int porta, String sufixoThread) {
+    if (porta <= 0 || !portasAbertas.add(porta)) {
+      return;
+    }
+    try {
+      ServidorUDP udpExtra = new ServidorUDP(porta, gerenciador, roteador, true);
+      servicosUDP.add(udpExtra);
+      new Thread(udpExtra, "Thread-ServidorUDP-" + sufixoThread + "-" + porta).start();
+    } catch (Exception ignored) {
+    }
+  }
+
+  private void abrirDiscoveryExtra(Set<Integer> portasAbertas, int porta, int idNo, int idShard,
+      int portaTcpAnunciada, int portaUdpAnunciada, String sufixoThread) {
+    if (porta <= 0 || !portasAbertas.add(porta)) {
+      return;
+    }
+    try {
+      ServidorDiscovery discExtra = new ServidorDiscovery(porta, true);
+      discExtra.configurarInfo(idNo, idShard, "ATIVO", portaTcpAnunciada, portaUdpAnunciada);
+      if (roteador != null) {
+        discExtra.setTabelaLideres(roteador.getTabelaLideres());
+      }
+      servicosDiscovery.add(discExtra);
+      new Thread(discExtra, "Thread-ServidorDiscovery-" + sufixoThread + "-" + porta).start();
+    } catch (Exception ignored) {
+    }
+  }
+
   /**
    * Inicia dinamicamente as portas de servico quando o no assume o papel de ATIVO em seu Shard.
-   * Quando {@code incluirLegado} e true (Shard 0), abre tambem obrigatoriamente a porta 5001
-   * de Discovery EDEN (mesmo quando portaTcp == 5000) e o UDP legado 5000.
+   * No failover de um Standby, tenta reabrir proativamente (com setReuseAddress(true)) tanto as
+   * portas pioneiras do seu Shard quanto as portas legadas/universais (5000, 6789, 7777, 5001/6001),
+   * garantindo continuidade transparente mesmo para clientes de terceiros que ignorem SERVER_CHANGED.
    */
   public synchronized void iniciarServicos(int portaTcp, int portaUdp, int portaDiscovery,
       boolean incluirLegado, int idNo, int idShard) {
@@ -88,13 +134,21 @@ public class Servidor {
     servicosUDP.clear();
     servicosDiscovery.clear();
 
+    Set<Integer> portasTcpAbertas = new HashSet<>();
+    Set<Integer> portasUdpAbertas = new HashSet<>();
+    Set<Integer> portasDiscoveryAbertas = new HashSet<>();
+
+    int shardSeguro = Math.max(0, idShard);
+
     // 1. Servico TCP principal (5000 + ID)
-    ServidorTCP tcpPrincipal = new ServidorTCP(portaTcp, gerenciador, roteador);
+    portasTcpAbertas.add(portaTcp);
+    ServidorTCP tcpPrincipal = new ServidorTCP(portaTcp, gerenciador, roteador, false);
     servicosTCP.add(tcpPrincipal);
     new Thread(tcpPrincipal, "Thread-ServidorTCP-" + portaTcp).start();
 
     // 2. Servico UDP principal (6000 + ID)
-    final ServidorUDP udpPrincipal = new ServidorUDP(portaUdp, gerenciador, roteador);
+    portasUdpAbertas.add(portaUdp);
+    final ServidorUDP udpPrincipal = new ServidorUDP(portaUdp, gerenciador, roteador, false);
     servicosUDP.add(udpPrincipal);
     new Thread(udpPrincipal, "Thread-ServidorUDP-" + portaUdp).start();
     if (roteador != null) {
@@ -102,157 +156,64 @@ public class Servidor {
           udpPrincipal.receberPacoteRoteado(apdu, ipCliente, portaUdpCliente, saltos));
     }
 
-    // 3. Servico Discovery padrao (8888) + porta dedicada do Shard (8888 + idShard) para colegas/Lucas
-    ServidorDiscovery discPrincipal = new ServidorDiscovery(portaDiscovery);
-    discPrincipal.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
+    // 3. Servicos Discovery (8888 padrao + 8888+idShard + 5001 universal EDEN)
+    portasDiscoveryAbertas.add(portaDiscovery);
+    ServidorDiscovery discPrincipal = new ServidorDiscovery(portaDiscovery, true);
+    discPrincipal.configurarInfo(idNo, shardSeguro, "ATIVO", portaTcp, portaUdp);
     if (roteador != null) {
       discPrincipal.setTabelaLideres(roteador.getTabelaLideres());
     }
     servicosDiscovery.add(discPrincipal);
     new Thread(discPrincipal, "Thread-ServidorDiscovery-" + portaDiscovery).start();
 
-    // Portas especificas por particao (8888, 8889, 8890) compativeis com Lucas (8888 + particao - 1)
-    int portaDiscoveryColegas = Protocolo.PORTA_DISCOVERY + Math.max(0, idShard);
-    boolean discoveryShardAberto = false;
-    if (portaDiscoveryColegas != portaDiscovery && portaDiscoveryColegas != Protocolo.PORTA_DISCOVERY_EDEN) {
-      try {
-        ServidorDiscovery discShard = new ServidorDiscovery(portaDiscoveryColegas);
-        discShard.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
-        if (roteador != null) {
-          discShard.setTabelaLideres(roteador.getTabelaLideres());
-        }
-        servicosDiscovery.add(discShard);
-        new Thread(discShard, "Thread-ServidorDiscovery-Shard-" + portaDiscoveryColegas).start();
-        discoveryShardAberto = true;
-      } catch (Exception ignored) {
-      }
-    }
+    int portaDiscoveryColegas = Protocolo.PORTA_DISCOVERY + shardSeguro;
+    abrirDiscoveryExtra(portasDiscoveryAbertas, portaDiscoveryColegas, idNo, shardSeguro, portaTcp, portaUdp, "Shard");
+    abrirDiscoveryExtra(portasDiscoveryAbertas, Protocolo.PORTA_DISCOVERY_EDEN, idNo, shardSeguro, portaTcp, portaUdp, "Eden");
 
-    boolean discovery5001Aberto = false;
-    boolean udp5000Aberto = false;
-    boolean tcp5000ExtraAberto = false;
-    boolean tcp6789ExtraAberto = false;
-    boolean udp7777ExtraAberto = false;
+    // 4. Portas Pioneiras de Fallback do proprio Shard (5001/6001 p/ S0, 5002/6002 p/ S1, 5003/6003 p/ S2):
+    // Quando uma replica Standby (ex: No 4, 5 ou 6) assume a lideranca apos a queda do pioneiro,
+    // reabre imediatamente as portas pioneiras do seu shard para absorver clientes que nao migraram porta.
+    int portaPioneiraTcp = PortasShard.tcp(shardSeguro, 0);
+    int portaPioneiraUdp = PortasShard.udp(shardSeguro, 0);
+    abrirTcpExtra(portasTcpAbertas, portaPioneiraTcp, "Pioneiro-S" + shardSeguro);
+    abrirUdpExtra(portasUdpAbertas, portaPioneiraUdp, "Pioneiro-S" + shardSeguro);
 
-    // 4. Portas universais de entrada para interoperabilidade (6789 TCP / 7777 UDP)
-    // Se a portaTcp principal deste no nao for 6789, tenta abrir tambem a 6789 (ou 6789 + idShard)
-    // para absorver conexoes diretas de clientes de colegas (Gateway Proxy)
-    int portaTcpColegas = Protocolo.PORTA_SERVIDOR_TCP + Math.max(0, idShard);
-    if (portaTcp != portaTcpColegas && portaTcp != Protocolo.PORTA_SERVIDOR_TCP) {
-      try {
-        ServidorTCP tcpColegas = new ServidorTCP(portaTcpColegas, gerenciador, roteador);
-        servicosTCP.add(tcpColegas);
-        new Thread(tcpColegas, "Thread-ServidorTCP-Interoperavel-" + portaTcpColegas).start();
-        tcp6789ExtraAberto = true;
-      } catch (Exception ignored) {
-      }
-    }
-    // Tenta tambem abrir a base 6789 se for Shard 0 ou livre
-    if (idShard == 0 && portaTcp != Protocolo.PORTA_SERVIDOR_TCP && !tcp6789ExtraAberto) {
-      try {
-        ServidorTCP tcp6789 = new ServidorTCP(Protocolo.PORTA_SERVIDOR_TCP, gerenciador, roteador);
-        servicosTCP.add(tcp6789);
-        new Thread(tcp6789, "Thread-ServidorTCP-Base-6789").start();
-        tcp6789ExtraAberto = true;
-      } catch (Exception ignored) {
-      }
-    }
+    // 5. Portas Interoperaveis por Shard (6789+shard TCP / 7777+shard UDP)
+    int portaTcpColegas = Protocolo.PORTA_SERVIDOR_TCP + shardSeguro;
+    int portaUdpColegas = Protocolo.PORTA_SERVIDOR_UDP + shardSeguro;
+    abrirTcpExtra(portasTcpAbertas, portaTcpColegas, "Interoperavel");
+    abrirUdpExtra(portasUdpAbertas, portaUdpColegas, "Interoperavel");
 
-    int portaUdpColegas = Protocolo.PORTA_SERVIDOR_UDP + Math.max(0, idShard);
-    if (portaUdp != portaUdpColegas && portaUdp != Protocolo.PORTA_SERVIDOR_UDP) {
-      try {
-        ServidorUDP udpColegas = new ServidorUDP(portaUdpColegas, gerenciador, roteador);
-        servicosUDP.add(udpColegas);
-        new Thread(udpColegas, "Thread-ServidorUDP-Interoperavel-" + portaUdpColegas).start();
-        udp7777ExtraAberto = true;
-      } catch (Exception ignored) {
+    // 6. Portas Universais / Legadas de Fallback (5000 TCP/UDP, 6789 TCP, 7777 UDP, 5001 TCP / 6001 UDP):
+    // - No Shard 0 (ou modo legado), tenta abrir sempre todas as portas universais.
+    // - Nos Shards 1 e 2, tenta abrir proativamente cada par universal caso o Shard 0 nao esteja escutando
+    //   localmente na respectiva porta TCP (evitando sequestro de UDP em localhost via SO_REUSEADDR no Linux,
+    //   mas assumindo imediatamente o Gateway universal se o S0 inteiro cair ou estiver em outra maquina!).
+    if (incluirLegado || shardSeguro == 0) {
+      abrirTcpExtra(portasTcpAbertas, Protocolo.PORTA_SERVIDOR_LEGACY, "Legado");
+      abrirUdpExtra(portasUdpAbertas, Protocolo.PORTA_SERVIDOR_LEGACY, "Legado");
+      abrirTcpExtra(portasTcpAbertas, Protocolo.PORTA_SERVIDOR_TCP, "Universal");
+      abrirUdpExtra(portasUdpAbertas, Protocolo.PORTA_SERVIDOR_UDP, "Universal");
+      abrirTcpExtra(portasTcpAbertas, 5001, "Universal-S0");
+      abrirUdpExtra(portasUdpAbertas, 6001, "Universal-S0");
+    } else {
+      if (ConfigCluster.isPortaDisponivel("0.0.0.0", Protocolo.PORTA_SERVIDOR_LEGACY)) {
+        abrirTcpExtra(portasTcpAbertas, Protocolo.PORTA_SERVIDOR_LEGACY, "Fallback-Legado");
+        abrirUdpExtra(portasUdpAbertas, Protocolo.PORTA_SERVIDOR_LEGACY, "Fallback-Legado");
       }
-    }
-
-    // 5. Portas legadas para compatibilidade T#01/T#02 (ativas no lider do Shard 0)
-    if (incluirLegado) {
-      // O lider do Shard 0 assume tambem o TCP legado 5000 (clientes T#01/T#02 de colegas);
-      // em failover, o novo lider do S0 reabre a 5000.
-      if (portaTcp != Protocolo.PORTA_SERVIDOR_LEGACY) {
-        try {
-          ServidorTCP tcpLegado = new ServidorTCP(Protocolo.PORTA_SERVIDOR_LEGACY, gerenciador, roteador);
-          servicosTCP.add(tcpLegado);
-          new Thread(tcpLegado, "Thread-ServidorTCP-Legado-5000").start();
-          tcp5000ExtraAberto = true;
-        } catch (Exception ignored) {
-        }
-      }
-
-      // UDP legado na 5000 (pois o UDP principal de S0/R0 e 6000)
-      if (portaUdp != Protocolo.PORTA_SERVIDOR_LEGACY) {
-        try {
-          ServidorUDP udpLegado = new ServidorUDP(Protocolo.PORTA_SERVIDOR_LEGACY, gerenciador, roteador);
-          servicosUDP.add(udpLegado);
-          new Thread(udpLegado, "Thread-ServidorUDP-Legado-5000").start();
-          udp5000Aberto = true;
-        } catch (Exception ignored) {
-        }
-      }
-    }
-
-    // 5b. Portas pioneiras do Shard 0 (TCP 5001 e UDP 6001):
-    // Quando uma replica secundaria do Shard 0 (ex: No 4) assume como lider apos a morte do pioneiro (No 1),
-    // tenta tambem abrir 5001 (TCP) e 6001 (UDP) caso estejam livres, para absorver conexoes e CONFIRMs
-    // de clientes e colegas antes de processarem o SERVER_CHANGED.
-    boolean tcp5001ExtraAberto = false;
-    boolean udp6001ExtraAberto = false;
-    if (idShard == 0) {
-      if (portaTcp != 5001) {
-        try {
-          ServidorTCP tcp5001 = new ServidorTCP(5001, gerenciador, roteador);
-          servicosTCP.add(tcp5001);
-          new Thread(tcp5001, "Thread-ServidorTCP-Pioneiro-5001").start();
-          tcp5001ExtraAberto = true;
-        } catch (Exception ignored) {
-        }
-      }
-      if (portaUdp != 6001) {
-        try {
-          ServidorUDP udp6001 = new ServidorUDP(6001, gerenciador, roteador);
-          servicosUDP.add(udp6001);
-          new Thread(udp6001, "Thread-ServidorUDP-Pioneiro-6001").start();
-          udp6001ExtraAberto = true;
-        } catch (Exception ignored) {
-        }
-      }
-    }
-
-    // 6. Discovery universal EDEN na porta UDP 5001: aberto por TODO lider de shard (SO_REUSEADDR),
-    //    assim qualquer cliente "burro" encontra algum lider via broadcast mesmo se o Shard 0 cair.
-    if (portaDiscovery != Protocolo.PORTA_DISCOVERY_EDEN) {
-      try {
-        ServidorDiscovery discEden = new ServidorDiscovery(Protocolo.PORTA_DISCOVERY_EDEN);
-        discEden.configurarInfo(idNo, idShard, "ATIVO", portaTcp, portaUdp);
-        if (roteador != null) {
-          discEden.setTabelaLideres(roteador.getTabelaLideres());
-        }
-        servicosDiscovery.add(discEden);
-        new Thread(discEden, "Thread-ServidorDiscovery-Eden-5001").start();
-        discovery5001Aberto = true;
-      } catch (Exception ignored) {
+      if (ConfigCluster.isPortaDisponivel("0.0.0.0", Protocolo.PORTA_SERVIDOR_TCP)) {
+        abrirTcpExtra(portasTcpAbertas, Protocolo.PORTA_SERVIDOR_TCP, "Fallback-Universal");
+        abrirUdpExtra(portasUdpAbertas, Protocolo.PORTA_SERVIDOR_UDP, "Fallback-Universal");
       }
     }
 
     this.servicosAtivos = true;
     this.gerenciador.setAtivo(true);
-    System.out.println("=== SERVICOS DE ATENDIMENTO ABERTOS (SHARD S" + idShard + " | PAPEL: ATIVO) ===");
+    System.out.println("=== SERVICOS DE ATENDIMENTO ABERTOS (SHARD S" + shardSeguro + " | PAPEL: ATIVO) ===");
     imprimirEnderecosLocais();
-    System.out.println("TCP escutando em " + portaTcp
-        + (tcp6789ExtraAberto ? " (+ interoperavel " + portaTcpColegas + ")" : "")
-        + (tcp5001ExtraAberto ? " (+ pioneiro 5001)" : "")
-        + (tcp5000ExtraAberto ? " (+ legado 5000)" : ""));
-    System.out.println("UDP escutando em " + portaUdp
-        + (udp7777ExtraAberto ? " (+ interoperavel " + portaUdpColegas + ")" : "")
-        + (udp6001ExtraAberto ? " (+ pioneiro 6001)" : "")
-        + (udp5000Aberto ? " (+ legado 5000)" : ""));
-    System.out.println("Discovery escutando em " + portaDiscovery
-        + (discoveryShardAberto ? ", " + portaDiscoveryColegas : "")
-        + (discovery5001Aberto ? " e " + Protocolo.PORTA_DISCOVERY_EDEN : ""));
+    System.out.println("TCP escutando em " + portaTcp + " | Todas TCP tentadas: " + portasTcpAbertas);
+    System.out.println("UDP escutando em " + portaUdp + " | Todas UDP tentadas: " + portasUdpAbertas);
+    System.out.println("Discovery escutando em " + portasDiscoveryAbertas);
     System.out.println("=================================================================");
   }
 

@@ -51,6 +51,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
   private CountDownLatch latchVotos;
   private final AtomicBoolean eleicaoEmAndamento = new AtomicBoolean(false);
   private final long inicioMs = System.currentTimeMillis();
+  private volatile long ultimoPedidoSyncMs = 0L;
   private final Set<String> eventosQuedaProcessados = Collections.synchronizedSet(
       Collections.newSetFromMap(new LinkedHashMap<String, Boolean>(256, 0.75f, true) {
         @Override
@@ -141,7 +142,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
             boolean ativoCaiu = visao.verificarTimeouts(6000);
             if (!ativoCaiu && idLiderAtivo > 0 && idLiderAtivo != config.getMeuId()) {
               VisaoCluster.ParEstado liderSt = visao.getPar(idLiderAtivo);
-              if (liderSt != null && "DOWN".equalsIgnoreCase(liderSt.estado)
+              if (liderSt != null
                   && (liderSt.ultimoHeartbeat > 0 && (System.currentTimeMillis() - liderSt.ultimoHeartbeat > 6000))) {
                 ClusterLog.aviso("ELEICAO", "Lider ativo conhecido (No " + idLiderAtivo + ") expirou sem heartbeat ha mais de 6s.");
                 ativoCaiu = true;
@@ -252,6 +253,20 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     }
   }
 
+  private void solicitarSyncComCooldown(int idLider) {
+    if (idLider <= 0 || idLider == config.getMeuId()) {
+      return;
+    }
+    long agora = System.currentTimeMillis();
+    if (agora - ultimoPedidoSyncMs < 1000L) {
+      return;
+    }
+    ultimoPedidoSyncMs = agora;
+    MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
+    pedido.setVersao(gerenciador.getVersao());
+    canal.enviar(idLider, pedido);
+  }
+
   /**
    * Chamado quando o Beacon UDP descobre dinamicamente um novo par do mesmo Shard.
    * Executa a regra de eleicao e subordinacao hierarquica deterministica (menor ID prevalece).
@@ -260,6 +275,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     if (novoPar == null || novoPar.idShard != config.getIdShard()) {
       return;
     }
+    config.registrarParDinamico(novoPar);
     visao.adicionarParSeAusente(novoPar);
     int portaClusterReal = PortasShard.clusterDoNo(novoPar.id);
     canal.adicionarParSeAusente(novoPar.id, novoPar.host, portaClusterReal);
@@ -281,9 +297,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         rebaixarParaStandby(parId, this.epoca);
         this.papel = "SINCRONIZANDO";
         aguardarConexaoSaida(parId, 300);
-        MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, meuId);
-        pedido.setVersao(gerenciador.getVersao());
-        canal.enviar(parId, pedido);
+        solicitarSyncComCooldown(parId);
       } else if ("INICIANDO".equalsIgnoreCase(this.papel)) {
         ClusterLog.info("BEACON:SHARD", String.format(
             "[BEACON:SHARD] Par descoberto: No %d. Meu ID: %d. Reconhecendo No %d como lider pioneiro (STANDBY).",
@@ -291,9 +305,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         this.idLiderAtivo = parId;
         this.papel = "SINCRONIZANDO";
         aguardarConexaoSaida(parId, 300);
-        MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, meuId);
-        pedido.setVersao(gerenciador.getVersao());
-        canal.enviar(parId, pedido);
+        solicitarSyncComCooldown(parId);
       } else if ("STANDBY".equalsIgnoreCase(this.papel)) {
         // Ja em STANDBY: apenas garante idLiderAtivo apontando para o menor ID
         this.idLiderAtivo = parId;
@@ -318,13 +330,15 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
 
   /**
    * Chamado quando um anuncio EDEN_SHARD_LAN e recebido de outro host para o MESMO Shard.
-   * Detecta split-brain entre maquinas fisicas ou descobre replicas na LAN.
+   * Detecta split-brain entre maquinas fisicas ou descobre replicas na LAN/localhost.
    */
   public synchronized void processarAnuncioMesmoShardLAN(
       int shardRemoto, int replicaRemota, int idNoRemoto, String papelRemoto, long epocaRemota, int idLiderRemoto, String hostRemoto) {
     int meuId = config.getMeuId();
     String meuHost = config.getMeuNoInfo().host;
-    if (hostRemoto == null || (idNoRemoto == meuId && (hostRemoto.equals(meuHost) || ("127.0.0.1".equals(hostRemoto) && "127.0.0.1".equals(meuHost))))) {
+    // Rejeita APENAS se for exatamente este mesmo processo (idNoRemoto == meuId E hostRemoto.equals(meuHost)).
+    // Processos diferentes no mesmo host precisam se ouvir e se eleger!
+    if (hostRemoto == null || (idNoRemoto == meuId && hostRemoto.equals(meuHost))) {
       return;
     }
     // 1. Colisao de ID entre hosts fisicos (duas maquinas diferentes assumiram o mesmo ID)
@@ -340,7 +354,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         if (euCedo) {
           ClusterLog.cura(String.format(
               "Meu host (%s) > Host remoto (%s): cedendo ID %d e assumindo modo STANDBY.",
-              meuHost, hostRemoto));
+              meuHost, hostRemoto, meuId));
           rebaixarParaStandby(idNoRemoto, epocaRemota);
         }
       }
@@ -594,10 +608,22 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
       canal.adicionarParSeAusente(msg.getIdOrigem(), hostOrig, pCluster);
     }
 
-    // Atualiza status do par
+    // Atualiza status do par preservando/inferindo corretamente o estado ATIVO do lider
+    String estadoPar = msg.getEstadoOrigem();
+    if (estadoPar == null || estadoPar.isEmpty()) {
+      if (msg.getTipo() == TipoMensagemCluster.COORDENADOR
+          || msg.getTipo() == TipoMensagemCluster.SNAPSHOT
+          || msg.getTipo() == TipoMensagemCluster.REPLICAR
+          || msg.getIdOrigem() == this.idLiderAtivo) {
+        estadoPar = "ATIVO";
+      } else {
+        VisaoCluster.ParEstado atual = visao.getPar(msg.getIdOrigem());
+        estadoPar = (atual != null && !"DOWN".equalsIgnoreCase(atual.estado)) ? atual.estado : "STANDBY";
+      }
+    }
     visao.atualizarHeartbeat(
         msg.getIdOrigem(),
-        msg.getEstadoOrigem() != null ? msg.getEstadoOrigem() : "STANDBY",
+        estadoPar,
         msg.getEpoca(),
         msg.getVersao(),
         msg.getHash(),
@@ -618,11 +644,18 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
           } else {
             this.idLiderAtivo = msg.getIdOrigem();
             this.epoca = Math.max(this.epoca, msg.getEpoca());
-            if ("INICIANDO".equalsIgnoreCase(this.papel)) {
-              this.papel = "SINCRONIZANDO";
-              MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
-              pedido.setVersao(gerenciador.getVersao());
-              canal.enviar(msg.getIdOrigem(), pedido);
+            long minhaVersao = gerenciador.getVersao();
+            boolean precisaSync = "INICIANDO".equalsIgnoreCase(this.papel)
+                || "SINCRONIZANDO".equalsIgnoreCase(this.papel)
+                || minhaVersao < msg.getVersao()
+                || (msg.getTipo() == TipoMensagemCluster.HEARTBEAT
+                    && minhaVersao == msg.getVersao()
+                    && gerenciador.calcularHash() != msg.getHash());
+            if (precisaSync) {
+              if ("INICIANDO".equalsIgnoreCase(this.papel)) {
+                this.papel = "SINCRONIZANDO";
+              }
+              solicitarSyncComCooldown(msg.getIdOrigem());
             }
           }
         }
@@ -650,15 +683,16 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
         if (!"ATIVO".equalsIgnoreCase(this.papel)) {
           if (msg.getPayload() instanceof byte[]) {
             byte[] dados = (byte[]) msg.getPayload();
-            replicador.instalarSnapshot(dados, msg.getEpoca(), msg.getVersao());
-            this.epoca = msg.getEpoca();
-            this.papel = "STANDBY"; // No sincronizado entra como STANDBY (D1)
-            this.idLiderAtivo = msg.getIdOrigem();
+            if (replicador.instalarSnapshot(dados, msg.getEpoca(), msg.getVersao())) {
+              this.epoca = msg.getEpoca();
+              this.papel = "STANDBY"; // No sincronizado entra como STANDBY (D1)
+              this.idLiderAtivo = msg.getIdOrigem();
 
-            MensagemCluster ok = new MensagemCluster(TipoMensagemCluster.SYNC_OK, config.getMeuId());
-            ok.setVersao(gerenciador.getVersao());
-            canal.enviar(msg.getIdOrigem(), ok);
-            ClusterLog.standby("Sincronizacao concluida com sucesso. No operando em STANDBY.");
+              MensagemCluster ok = new MensagemCluster(TipoMensagemCluster.SYNC_OK, config.getMeuId());
+              ok.setVersao(gerenciador.getVersao());
+              canal.enviar(msg.getIdOrigem(), ok);
+              ClusterLog.standby("Sincronizacao concluida com sucesso. No operando em STANDBY.");
+            }
           }
         }
         break;
@@ -700,9 +734,7 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
 
           ClusterLog.info("CLUSTER", "Solicitando SNAPSHOT do lider No " + msg.getIdOrigem() + "...");
           this.papel = "SINCRONIZANDO";
-          MensagemCluster pedido = new MensagemCluster(TipoMensagemCluster.PEDIDO_SYNC, config.getMeuId());
-          pedido.setVersao(gerenciador.getVersao());
-          canal.enviar(msg.getIdOrigem(), pedido);
+          solicitarSyncComCooldown(msg.getIdOrigem());
         } else {
           ClusterLog.aviso("CLUSTER", "Ignorando COORDENADOR obsoleto do No " + msg.getIdOrigem()
               + " (Epoca " + msg.getEpoca() + " < Minha " + this.epoca + ")");
@@ -807,10 +839,11 @@ public class NoCluster implements CanalCluster.ReceptorMensagemCluster {
     this.executando = false;
     roteador.parar();
     if ("ATIVO".equalsIgnoreCase(this.papel)) {
+      // Libera as portas TCP/UDP/Discovery ANTES de disparar RENUNCIA para que o Standby assuma sem colisao de bind!
+      servidor.pararServicos();
       ClusterLog.info("CLUSTER", "Enviando RENUNCIA aos pares antes de encerrar...");
       MensagemCluster renuncia = new MensagemCluster(TipoMensagemCluster.RENUNCIA, config.getMeuId());
       canal.broadcast(renuncia);
-      servidor.pararServicos();
     } else {
       MensagemCluster saindo = new MensagemCluster(TipoMensagemCluster.SAINDO, config.getMeuId());
       canal.broadcast(saindo);

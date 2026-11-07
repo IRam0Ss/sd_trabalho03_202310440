@@ -172,7 +172,7 @@ public class ConfigCluster implements Serializable {
    */
   public static boolean isPortaEmUso(String host, int porta) {
     try (Socket s = new Socket()) {
-      s.connect(new InetSocketAddress(host, porta), 80);
+      s.connect(new InetSocketAddress(host, porta), 500);
       return true;
     } catch (Exception e) {
       return false;
@@ -212,6 +212,7 @@ public class ConfigCluster implements Serializable {
 
   private static boolean portaUdpLivre(int porta) {
     try (DatagramSocket ds = new DatagramSocket(null)) {
+      ds.setReuseAddress(true);
       ds.bind(new InetSocketAddress(porta));
       return true;
     } catch (Exception e) {

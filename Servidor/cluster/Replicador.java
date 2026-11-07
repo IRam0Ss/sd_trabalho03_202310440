@@ -200,9 +200,13 @@ public class Replicador {
       snap.setVersao(gerenciador.getVersao());
       snap.setHash(gerenciador.calcularHash());
       snap.setPayload(dados);
-      canal.enviar(idDestino, snap);
-      System.out.println("[REPLICADOR] [INFO] Snapshot (v=" + gerenciador.getVersao() + ", "
-          + dados.length + " bytes) enviado ao No " + idDestino);
+      boolean enviado = canal.enviar(idDestino, snap);
+      if (enviado) {
+        System.out.println("[REPLICADOR] [INFO] Snapshot (v=" + gerenciador.getVersao() + ", "
+            + dados.length + " bytes) enviado ao No " + idDestino);
+      } else {
+        System.err.println("[REPLICADOR] [WARNING] Nao foi possivel entregar Snapshot imediatamente ao No " + idDestino);
+      }
     } finally {
       lockReplicacao.unlock();
     }
@@ -214,7 +218,7 @@ public class Replicador {
   public boolean instalarSnapshot(byte[] dados, long epoca, long versao) {
     lockReplicacao.lock();
     try {
-      gerenciador.importarSnapshot(dados);
+      gerenciador.aplicarSnapshot(dados);
       System.out.println("[REPLICADOR] [INFO] Snapshot instalado com sucesso. Versao atual: " + gerenciador.getVersao());
       return true;
     } catch (Exception e) {

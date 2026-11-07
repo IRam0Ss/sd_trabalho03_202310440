@@ -97,6 +97,12 @@ public class VisaoCluster implements Serializable {
     ParEstado p = pares.get(id);
     if (p != null) {
       p.conectado = conectado;
+      if (conectado) {
+        p.ultimoHeartbeat = System.currentTimeMillis();
+        if ("DOWN".equalsIgnoreCase(p.estado)) {
+          p.estado = "SINCRONIZANDO";
+        }
+      }
       // IMPORTANTE: NAO marcar p.estado = "DOWN" imediatamente em caso de desconexao momentanea.
       // Em redes reais/Wi-Fi, reconexoes rapidas de TCP nao significam queda do lider.
       // A declaracao de DOWN deve ocorrer somente quando o heartbeat expirar no metodo verificarTimeouts().
@@ -143,7 +149,7 @@ public class VisaoCluster implements Serializable {
         ativoCaiu = true;
         p.estado = "DOWN";
         p.conectado = false;
-      } else if (p.isVivo() && p.ultimoHeartbeat > 0 && (agora - p.ultimoHeartbeat > timeoutMs)) {
+      } else if (!"DOWN".equalsIgnoreCase(p.estado) && p.ultimoHeartbeat > 0 && (agora - p.ultimoHeartbeat > timeoutMs)) {
         System.out.println("[CLUSTER] [WARNING] No " + p.id + " sem heartbeat ha " + (agora - p.ultimoHeartbeat)
             + "ms -> Marcado como DOWN (era: " + p.estado + ")");
         p.estado = "DOWN";

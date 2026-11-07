@@ -14,9 +14,12 @@ import java.io.ObjectOutputStream;
 import java.net.DatagramPacket;
 import java.net.DatagramSocket;
 import java.net.InetAddress;
+import java.net.InetSocketAddress;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 
 import Protocol.APDU;
 import utils.InfoUser;
@@ -91,10 +94,23 @@ public class NotificadorClientes {
     if (usuarios == null || usuarios.isEmpty()) {
       return;
     }
-    final List<InfoUser> lista = new ArrayList<>(usuarios);
+    // Deduplica por endpoint fisico IP:PortaUDP para que nenhum cliente local ou cross-shard seja omitido
+    Map<String, InfoUser> deduplicados = new LinkedHashMap<>();
+    for (InfoUser u : usuarios) {
+      if (u != null && u.getIp() != null && !u.getIp().trim().isEmpty() && u.getPorta() > 0) {
+        String chave = u.getIp().trim() + ":" + u.getPorta();
+        deduplicados.putIfAbsent(chave, u);
+      }
+    }
+    if (deduplicados.isEmpty()) {
+      return;
+    }
+    final List<InfoUser> lista = new ArrayList<>(deduplicados.values());
 
     new Thread(() -> {
-      try (DatagramSocket socketUDP = new DatagramSocket()) {
+      try (DatagramSocket socketUDP = new DatagramSocket(null)) {
+        socketUDP.setReuseAddress(true);
+        socketUDP.bind(new InetSocketAddress(0));
         String ipLanReal = null;
 
         // Envia 3 rajadas com intervalo de 200ms para garantir recepcao

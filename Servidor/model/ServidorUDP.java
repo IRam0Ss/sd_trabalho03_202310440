@@ -53,6 +53,7 @@ public class ServidorUDP implements Runnable {
   private final int porta;
   private final GerenciadorGrupos gerenciador;
   private final RoteadorShards roteador;
+  private final boolean modoFallback;
   private static final int BUFFER = 4096;
   private volatile boolean executando = true;
   private volatile DatagramSocket socketUDP;
@@ -64,7 +65,7 @@ public class ServidorUDP implements Runnable {
    * @param gerenciador O gerenciador compartilhado de grupos e usuarios.
    */
   public ServidorUDP(int porta, GerenciadorGrupos gerenciador) {
-    this(porta, gerenciador, null);
+    this(porta, gerenciador, null, false);
   }
 
   /**
@@ -75,9 +76,17 @@ public class ServidorUDP implements Runnable {
    * @param roteador    O roteador inter-shard (ou null em modo isolado).
    */
   public ServidorUDP(int porta, GerenciadorGrupos gerenciador, RoteadorShards roteador) {
+    this(porta, gerenciador, roteador, false);
+  }
+
+  /**
+   * Construtor com suporte a reabertura proativa de portas de fallback em failover.
+   */
+  public ServidorUDP(int porta, GerenciadorGrupos gerenciador, RoteadorShards roteador, boolean modoFallback) {
     this.porta = porta;
     this.gerenciador = gerenciador;
     this.roteador = roteador;
+    this.modoFallback = modoFallback;
   }
 
   /**
@@ -124,9 +133,34 @@ public class ServidorUDP implements Runnable {
   @Override
   public void run() {
     try {
-      DatagramSocket sock = new DatagramSocket(null);
-      sock.setReuseAddress(true);
-      sock.bind(new InetSocketAddress(this.porta));
+      DatagramSocket sock = null;
+      int tentativas = modoFallback ? 4 : 2;
+      Exception ultimoErroBind = null;
+      for (int t = 1; t <= tentativas && executando; t++) {
+        try {
+          DatagramSocket candidato = new DatagramSocket(null);
+          candidato.setReuseAddress(true);
+          candidato.bind(new InetSocketAddress(this.porta));
+          sock = candidato;
+          break;
+        } catch (Exception exBind) {
+          ultimoErroBind = exBind;
+          if (t < tentativas && executando) {
+            try {
+              Thread.sleep(120);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+              break;
+            }
+          }
+        }
+      }
+      if (sock == null) {
+        if (!modoFallback && executando && ultimoErroBind != null) {
+          System.err.println("[UDP] [ERRO] Erro no bind UDP (porta " + porta + "): " + ultimoErroBind.getMessage());
+        }
+        return;
+      }
       this.socketUDP = sock;
 
       System.out.println("[UDP] Escutando na porta " + porta);

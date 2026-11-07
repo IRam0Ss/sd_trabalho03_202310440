@@ -31,6 +31,7 @@ import cluster.TabelaLideres;
 public class ServidorDiscovery implements Runnable {
 
   private final int porta;
+  private final boolean modoFallback;
   private DatagramSocket socket;
   private volatile boolean executando = true;
   private int idNo = 1;
@@ -41,11 +42,16 @@ public class ServidorDiscovery implements Runnable {
   private TabelaLideres tabelaLideres;
 
   public ServidorDiscovery() {
-    this(Protocolo.PORTA_DISCOVERY);
+    this(Protocolo.PORTA_DISCOVERY, false);
   }
 
   public ServidorDiscovery(int porta) {
+    this(porta, false);
+  }
+
+  public ServidorDiscovery(int porta, boolean modoFallback) {
     this.porta = porta;
+    this.modoFallback = modoFallback;
   }
 
   public void setTabelaLideres(TabelaLideres tabela) {
@@ -78,10 +84,34 @@ public class ServidorDiscovery implements Runnable {
   @Override
   public void run() {
     try {
-      socket = new DatagramSocket(null);
-      socket.setReuseAddress(true);
-      socket.setBroadcast(true);
-      socket.bind(new InetSocketAddress(porta));
+      int tentativas = modoFallback ? 4 : 2;
+      Exception ultimoErroBind = null;
+      for (int t = 1; t <= tentativas && executando; t++) {
+        try {
+          DatagramSocket candidato = new DatagramSocket(null);
+          candidato.setReuseAddress(true);
+          candidato.setBroadcast(true);
+          candidato.bind(new InetSocketAddress(porta));
+          socket = candidato;
+          break;
+        } catch (Exception exBind) {
+          ultimoErroBind = exBind;
+          if (t < tentativas && executando) {
+            try {
+              Thread.sleep(120);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+              break;
+            }
+          }
+        }
+      }
+      if (socket == null) {
+        if (!modoFallback && executando && ultimoErroBind != null) {
+          System.err.println("[DISCOVERY:" + porta + "] [ERROR] Falha no farol: " + ultimoErroBind.getMessage());
+        }
+        return;
+      }
 
       System.out.println("[DISCOVERY:" + porta + "] Farol UDP ligado na porta " + porta + " (Shard S" + idShard + ") aguardando buscas...");
       byte[] buffer = new byte[256];

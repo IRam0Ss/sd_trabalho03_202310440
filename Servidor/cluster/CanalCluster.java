@@ -55,6 +55,7 @@ public class CanalCluster {
     Socket socket;
     ObjectOutputStream oos;
     final Object lockEnvio = new Object();
+    final Object lockConexao = new Object();
 
     SaidaPar(int id, String host, int porta) {
       this.id = id;
@@ -161,29 +162,46 @@ public class CanalCluster {
   }
 
   private void tentarConectarSaida(SaidaPar saida) {
-    try {
-      Socket s = new Socket();
-      s.setTcpNoDelay(true);
-
+    if (saida == null || !executando) {
+      return;
+    }
+    boolean conectouAgora = false;
+    synchronized (saida.lockConexao) {
+      if (saida.isConectado()) {
+        return;
+      }
       try {
-        s.connect(new InetSocketAddress(saida.host, saida.porta), 800);
-      } catch (IOException exCon) {
-        if (!"127.0.0.1".equals(saida.host)) {
-          s = new Socket();
-          s.setTcpNoDelay(true);
-          s.connect(new InetSocketAddress("127.0.0.1", saida.porta), 800);
-        } else {
-          throw exCon;
+        Socket s = new Socket();
+        s.setTcpNoDelay(true);
+
+        try {
+          s.connect(new InetSocketAddress(saida.host, saida.porta), 800);
+        } catch (IOException exCon) {
+          if (!"127.0.0.1".equals(saida.host)) {
+            s = new Socket();
+            s.setTcpNoDelay(true);
+            s.connect(new InetSocketAddress("127.0.0.1", saida.porta), 800);
+          } else {
+            throw exCon;
+          }
         }
-      }
 
-      ObjectOutputStream oos = new ObjectOutputStream(s.getOutputStream());
-      oos.flush();
+        ObjectOutputStream oos = new ObjectOutputStream(s.getOutputStream());
+        oos.flush();
 
-      synchronized (saida.lockEnvio) {
-        saida.socket = s;
-        saida.oos = oos;
+        synchronized (saida.lockEnvio) {
+          saida.socket = s;
+          saida.oos = oos;
+        }
+        conectouAgora = true;
+      } catch (Exception ignored) {
+        saida.fechar();
+        visao.marcarConectado(saida.id, false);
+        return;
       }
+    }
+
+    if (conectouAgora) {
       visao.marcarConectado(saida.id, true);
       System.out.println("[CLUSTER:TCP] [INFO] Conexao de saida estabelecida com o No " + saida.id + " (" + saida.host + ":" + saida.porta + ")");
 
@@ -197,19 +215,33 @@ public class CanalCluster {
         hello.setPortaUdpServico(meuInfo.portaUdp);
       }
       enviar(saida.id, hello);
-
-    } catch (Exception ignored) {
-      saida.fechar();
-      visao.marcarConectado(saida.id, false);
     }
   }
 
   /**
    * Envia uma mensagem para um no especifico via conexao de saida.
+   * Caso o canal de saida esteja ainda estabelecendo conexao durante o handshake inicial,
+   * sincroniza imediatamente para nao descartar comandos criticos (PEDIDO_SYNC, SNAPSHOT, COORDENADOR, REPLICAR).
    */
   public boolean enviar(int idDestino, MensagemCluster msg) {
+    if (msg == null) {
+      return false;
+    }
     SaidaPar saida = conexoesSaida.get(idDestino);
-    if (saida == null || !saida.isConectado()) {
+    if (saida == null) {
+      ConfigCluster.NoInfo info = config.getNos().get(idDestino);
+      if (info != null && info.id != config.getMeuId()) {
+        adicionarParSeAusente(info.id, info.host, info.portaCluster);
+        saida = conexoesSaida.get(idDestino);
+      }
+    }
+    if (saida == null) {
+      return false;
+    }
+    if (!saida.isConectado() && msg.getTipo() != TipoMensagemCluster.HEARTBEAT) {
+      tentarConectarSaida(saida);
+    }
+    if (!saida.isConectado()) {
       return false;
     }
 

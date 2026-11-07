@@ -30,6 +30,7 @@ public class ServidorTCP implements Runnable {
   private final int porta;
   private final GerenciadorGrupos gerenciador;
   private final RoteadorShards roteador;
+  private final boolean modoFallback;
   private final Set<Socket> conexoesClientes = ConcurrentHashMap.newKeySet();
   private volatile boolean executando = true;
   private ServerSocket servidorTCP;
@@ -38,7 +39,7 @@ public class ServidorTCP implements Runnable {
    * Construtor legado/monolitico do ServidorTCP.
    */
   public ServidorTCP(int porta, GerenciadorGrupos gerenciador) {
-    this(porta, gerenciador, null);
+    this(porta, gerenciador, null, false);
   }
 
   /**
@@ -49,9 +50,17 @@ public class ServidorTCP implements Runnable {
    * @param roteador    O roteador inter-shards (ou null em modo isolado).
    */
   public ServidorTCP(int porta, GerenciadorGrupos gerenciador, RoteadorShards roteador) {
+    this(porta, gerenciador, roteador, false);
+  }
+
+  /**
+   * Construtor com suporte a reabertura proativa de portas de fallback em failover.
+   */
+  public ServidorTCP(int porta, GerenciadorGrupos gerenciador, RoteadorShards roteador, boolean modoFallback) {
     this.porta = porta;
     this.gerenciador = gerenciador;
     this.roteador = roteador;
+    this.modoFallback = modoFallback;
   }
 
   /**
@@ -85,9 +94,35 @@ public class ServidorTCP implements Runnable {
   @Override
   public void run() {
     try {
-      this.servidorTCP = new ServerSocket();
-      this.servidorTCP.setReuseAddress(true);
-      this.servidorTCP.bind(new java.net.InetSocketAddress(porta));
+      int tentativas = modoFallback ? 4 : 2;
+      Exception ultimoErroBind = null;
+      boolean bindConcluido = false;
+      for (int t = 1; t <= tentativas && executando; t++) {
+        try {
+          ServerSocket candidato = new ServerSocket();
+          candidato.setReuseAddress(true);
+          candidato.bind(new java.net.InetSocketAddress(porta));
+          this.servidorTCP = candidato;
+          bindConcluido = true;
+          break;
+        } catch (Exception exBind) {
+          ultimoErroBind = exBind;
+          if (t < tentativas && executando) {
+            try {
+              Thread.sleep(120);
+            } catch (InterruptedException ie) {
+              Thread.currentThread().interrupt();
+              break;
+            }
+          }
+        }
+      }
+      if (!bindConcluido) {
+        if (!modoFallback && executando && ultimoErroBind != null) {
+          System.err.println("[SERVIDOR:TCP] [ERROR] Porta " + porta + ": " + ultimoErroBind.getMessage());
+        }
+        return;
+      }
       System.out.println("[SERVIDOR:TCP] [INFO] Escutando na porta " + porta);
 
       while (executando && !servidorTCP.isClosed()) {

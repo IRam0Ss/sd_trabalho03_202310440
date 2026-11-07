@@ -91,6 +91,42 @@ public class RegistroMensagem implements Serializable {
     this.timestamp = timestamp;
   }
 
+  private RegistroMensagem(String idMensagem, String nomeGrupo, String autor, String ipAutor, int portaAutor,
+      boolean privado, Set<String> esperados, Set<String> entregues, Set<String> lidos,
+      boolean entregueNotificado, boolean lidoNotificado, long timestamp) {
+    this.idMensagem = idMensagem;
+    this.nomeGrupo = nomeGrupo;
+    this.autor = autor;
+    this.ipAutor = ipAutor;
+    this.portaAutor = portaAutor;
+    this.privado = privado;
+    this.destinatariosEsperados = new HashSet<>(esperados);
+    this.destinatariosEntregues = new HashSet<>(entregues);
+    this.destinatariosLidos = new HashSet<>(lidos);
+    this.entregueNotificado = entregueNotificado;
+    this.lidoNotificado = lidoNotificado;
+    this.timestamp = timestamp;
+  }
+
+  /**
+   * Cria um clone profundo e thread-safe deste registro de mensagem (incluindo estado de ticks CONFIRM).
+   */
+  public synchronized RegistroMensagem copiar() {
+    return new RegistroMensagem(
+        this.idMensagem,
+        this.nomeGrupo,
+        this.autor,
+        this.ipAutor,
+        this.portaAutor,
+        this.privado,
+        this.destinatariosEsperados,
+        this.destinatariosEntregues,
+        this.destinatariosLidos,
+        this.entregueNotificado,
+        this.lidoNotificado,
+        this.timestamp);
+  }
+
   public String getIdMensagem() {
     return idMensagem;
   }
@@ -115,31 +151,31 @@ public class RegistroMensagem implements Serializable {
     return privado;
   }
 
-  public Set<String> getDestinatariosEsperados() {
+  public synchronized Set<String> getDestinatariosEsperados() {
     return new HashSet<>(destinatariosEsperados);
   }
 
-  public Set<String> getDestinatariosEntregues() {
+  public synchronized Set<String> getDestinatariosEntregues() {
     return new HashSet<>(destinatariosEntregues);
   }
 
-  public Set<String> getDestinatariosLidos() {
+  public synchronized Set<String> getDestinatariosLidos() {
     return new HashSet<>(destinatariosLidos);
   }
 
-  public boolean isEntregueNotificado() {
+  public synchronized boolean isEntregueNotificado() {
     return entregueNotificado;
   }
 
-  public void setEntregueNotificado(boolean entregueNotificado) {
+  public synchronized void setEntregueNotificado(boolean entregueNotificado) {
     this.entregueNotificado = entregueNotificado;
   }
 
-  public boolean isLidoNotificado() {
+  public synchronized boolean isLidoNotificado() {
     return lidoNotificado;
   }
 
-  public void setLidoNotificado(boolean lidoNotificado) {
+  public synchronized void setLidoNotificado(boolean lidoNotificado) {
     this.lidoNotificado = lidoNotificado;
   }
 
@@ -153,7 +189,7 @@ public class RegistroMensagem implements Serializable {
    * @param usuario Nome do usuario destinatario.
    * @return true se foi a primeira entrega geral registrada que ainda nao foi notificada ao autor.
    */
-  public boolean registrarEntrega(String usuario) {
+  public synchronized boolean registrarEntrega(String usuario) {
     if (usuario != null && !usuario.trim().isEmpty()) {
       destinatariosEntregues.add(usuario.trim().toLowerCase());
     }
@@ -171,7 +207,7 @@ public class RegistroMensagem implements Serializable {
    * @param membrosAtuaisGrupo Nomes normalizados dos membros atuais da sala.
    * @return true se todos os membros esperados leram e essa conclusao ainda nao havia sido notificada.
    */
-  public boolean registrarLeitura(String usuario, Set<String> membrosAtuaisGrupo) {
+  public synchronized boolean registrarLeitura(String usuario, Set<String> membrosAtuaisGrupo) {
     if (usuario != null && !usuario.trim().isEmpty()) {
       String norm = usuario.trim().toLowerCase();
       destinatariosEntregues.add(norm);
